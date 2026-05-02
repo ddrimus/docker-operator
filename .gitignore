@@ -1,0 +1,20 @@
+# Local secrets, use example.env as a template
+*.env
+!example.env
+
+# OS-specific system files
+.DS_Store
+Thumbs.db
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
