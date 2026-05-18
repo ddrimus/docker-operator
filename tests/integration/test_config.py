@@ -36,7 +36,8 @@ def test_missing_git_repo_url_exits_fatal(monkeypatch):
 
 def test_defaults_when_optional_vars_unset(monkeypatch):
     _set_env(monkeypatch)
-    for name in ("GIT_BRANCH", "DATA_DIR", "DEPLOY_DIR", "COMPOSE_SUBDIR", "LOG_LEVEL"):
+    for name in ("GIT_BRANCH", "DATA_DIR", "DEPLOY_DIR", "COMPOSE_SUBDIR", "LISTEN_PORT",
+                 "PULL_IMAGES", "PRUNE_REMOVED_STACKS", "POLL_INTERVAL_SECONDS", "LOG_LEVEL"):
         monkeypatch.delenv(name, raising=False)
     s = load_settings()
     assert s.git_branch == "main"
@@ -44,6 +45,10 @@ def test_defaults_when_optional_vars_unset(monkeypatch):
     # Falls back to data_dir/deploy when unset
     assert s.deploy_dir == Path("/data/deploy")
     assert s.compose_subdir == "compose"
+    assert s.listen_port == 8080
+    assert s.pull_images is True
+    assert s.prune_removed_stacks is False
+    assert s.poll_interval_seconds == 300
     assert s.log_level == "INFO"
 
 
@@ -52,6 +57,19 @@ def test_deploy_dir_independent_of_data_dir_when_set(monkeypatch):
     s = load_settings()
     assert s.data_dir == Path("/data")
     assert s.deploy_dir == Path("/deploy")
+
+
+@pytest.mark.parametrize("val,expected", [("1", True), ("true", True), ("YES", True), ("on", True),
+                                          ("0", False), ("false", False), ("no", False), ("", False)])
+def test_bool_env_parsing(monkeypatch, val, expected):
+    _set_env(monkeypatch, PULL_IMAGES=val)
+    assert load_settings().pull_images is expected
+
+
+def test_invalid_int_env_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, POLL_INTERVAL_SECONDS="not-a-number")
+    with pytest.raises(SystemExit):
+        load_settings()
 
 
 def test_derived_properties(monkeypatch):
