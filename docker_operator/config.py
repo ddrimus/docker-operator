@@ -14,6 +14,24 @@ def _env(name: str, default: str | None = None, required: bool = False) -> str:
     return val or ""
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    val = os.environ.get(name)
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        print(f"FATAL: {name} must be an integer, got {val!r}", file=sys.stderr)
+        sys.exit(1)
+
+
 # Immutable snapshot of all operator configuration loaded from environment variables
 @dataclass(frozen=True)
 class Settings:
@@ -23,6 +41,13 @@ class Settings:
     data_dir: Path
     deploy_dir: Path
     compose_subdir: str
+    listen_host: str
+    listen_port: int
+    webhook_path: str
+    pull_images: bool
+    prune_removed_stacks: bool
+    poll_interval_seconds: int
+    deploy_timeout_seconds: int
     log_level: str
 
     @property
@@ -53,5 +78,12 @@ def load_settings() -> Settings:
         data_dir=data_dir,
         deploy_dir=deploy_dir,
         compose_subdir=_env("COMPOSE_SUBDIR", "compose"),
+        listen_host=_env("LISTEN_HOST", "0.0.0.0"),
+        listen_port=_env_int("LISTEN_PORT", 8080),
+        webhook_path=_env("WEBHOOK_PATH", "/webhook"),
+        pull_images=_env_bool("PULL_IMAGES", True),
+        prune_removed_stacks=_env_bool("PRUNE_REMOVED_STACKS", False),
+        poll_interval_seconds=_env_int("POLL_INTERVAL_SECONDS", 300),
+        deploy_timeout_seconds=_env_int("DEPLOY_TIMEOUT_SECONDS", 300),
         log_level=_env("LOG_LEVEL", "INFO"),
     )
