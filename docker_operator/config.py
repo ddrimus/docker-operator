@@ -32,6 +32,15 @@ def _env_int(name: str, default: int) -> int:
         sys.exit(1)
 
 
+# Return the local filesystem path if GIT_REPO_URL is a bind-mounted repo rather than a network URL, so a missing mount fails fast at startup
+def local_repo_path(url: str) -> Path | None:
+    if url.startswith("file://"):
+        return Path(url[len("file://"):])
+    if url.startswith(("/", "./", "../")):
+        return Path(url)
+    return None
+
+
 # Immutable snapshot of all operator configuration loaded from environment variables
 @dataclass(frozen=True)
 class Settings:
@@ -41,6 +50,7 @@ class Settings:
     data_dir: Path
     deploy_dir: Path
     compose_subdir: str
+    sops_age_key_file: Path | None
     listen_host: str
     listen_port: int
     webhook_path: str
@@ -48,6 +58,7 @@ class Settings:
     prune_removed_stacks: bool
     poll_interval_seconds: int
     deploy_timeout_seconds: int
+    notify_webhook_url: str | None
     log_level: str
 
     @property
@@ -69,7 +80,20 @@ def load_settings() -> Settings:
     deploy_dir_raw = _env("DEPLOY_DIR", "")
     deploy_dir = Path(deploy_dir_raw) if deploy_dir_raw else (data_dir / "deploy")
 
+    sops_key_raw = os.environ.get("SOPS_AGE_KEY_FILE") or ""
+    sops_key: Path | None = None
+    if sops_key_raw:
+        sops_key = Path(sops_key_raw)
+        if not sops_key.is_file():
+            print(f"FATAL: SOPS_AGE_KEY_FILE {sops_key} does not exist", file=sys.stderr)
+            sys.exit(1)
+
     git_repo_url = _env("GIT_REPO_URL", required=True)
+    local_repo = local_repo_path(git_repo_url)
+    if local_repo is not None and not (local_repo / "HEAD").exists() and not (local_repo / ".git" / "HEAD").exists():
+        print(f"FATAL: GIT_REPO_URL {git_repo_url!r} looks like a local path but no git repo "
+              f"(no HEAD file) was found there, check the bind mount", file=sys.stderr)
+        sys.exit(1)
 
     return Settings(
         webhook_secret=_env("WEBHOOK_SECRET", required=True),
@@ -78,6 +102,7 @@ def load_settings() -> Settings:
         data_dir=data_dir,
         deploy_dir=deploy_dir,
         compose_subdir=_env("COMPOSE_SUBDIR", "compose"),
+        sops_age_key_file=sops_key,
         listen_host=_env("LISTEN_HOST", "0.0.0.0"),
         listen_port=_env_int("LISTEN_PORT", 8080),
         webhook_path=_env("WEBHOOK_PATH", "/webhook"),
@@ -85,5 +110,6 @@ def load_settings() -> Settings:
         prune_removed_stacks=_env_bool("PRUNE_REMOVED_STACKS", False),
         poll_interval_seconds=_env_int("POLL_INTERVAL_SECONDS", 300),
         deploy_timeout_seconds=_env_int("DEPLOY_TIMEOUT_SECONDS", 300),
+        notify_webhook_url=os.environ.get("NOTIFY_WEBHOOK_URL") or None,
         log_level=_env("LOG_LEVEL", "INFO"),
     )
