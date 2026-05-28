@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 
-from docker_operator.stacks import discover_stacks
+from docker_operator.stacks import discover_stacks, stack_hash
 
 
 def _write_stack(root: Path, name: str, compose: str = "services: {}\n",
@@ -45,3 +45,66 @@ def test_discover_ignores_plain_files_in_compose_root(tmp_path: Path):
     (root / "README.md").write_text("not a stack dir")
     _write_stack(root, "real-stack")
     assert set(discover_stacks(root)) == {"real-stack"}
+
+
+def test_hash_changes_when_compose_yaml_changes(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s", compose="services:\n  a:\n    image: alpine:3.20\n")
+    stacks = discover_stacks(root)
+    h1 = stack_hash(stacks["s"])
+    (d / "compose.yaml").write_text("services:\n  a:\n    image: alpine:3.21\n")
+    h2 = stack_hash(discover_stacks(root)["s"])
+    assert h1 != h2
+
+
+def test_hash_changes_when_env_config_changes(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s", env_config="FOO=bar\n")
+    stacks = discover_stacks(root)
+    h1 = stack_hash(stacks["s"])
+    (d / ".env.config").write_text("FOO=baz\n")
+    h2 = stack_hash(discover_stacks(root)["s"])
+    assert h1 != h2
+
+
+def test_hash_changes_when_secrets_encrypted_changes(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s", env_secrets=b"enc-v1")
+    stacks = discover_stacks(root)
+    h1 = stack_hash(stacks["s"])
+    (d / ".env.secrets.encrypted").write_bytes(b"enc-v2")
+    h2 = stack_hash(discover_stacks(root)["s"])
+    assert h1 != h2
+
+
+def test_hash_ignores_env_secrets_example(tmp_path: Path):
+    # .env.secrets.example is documentation only, never deployed; must not trigger a redeploy when it changes
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s")
+    (d / ".env.secrets.example").write_text("FOO=changeme\n")
+    h1 = stack_hash(discover_stacks(root)["s"])
+    (d / ".env.secrets.example").write_text("FOO=something-else\n")
+    h2 = stack_hash(discover_stacks(root)["s"])
+    assert h1 == h2
+
+
+def test_hash_stable_across_repeated_calls(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    _write_stack(root, "s", env_config="FOO=bar\n")
+    h1 = stack_hash(discover_stacks(root)["s"])
+    h2 = stack_hash(discover_stacks(root)["s"])
+    assert h1 == h2
+
+
+def test_hash_differs_for_missing_vs_present_optional_files(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    _write_stack(root, "no-config")
+    _write_stack(root, "with-config", env_config="")
+    stacks = discover_stacks(root)
+    assert stack_hash(stacks["no-config"]) != stack_hash(stacks["with-config"])
