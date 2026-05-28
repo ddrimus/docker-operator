@@ -1,5 +1,6 @@
-# Discovers deployable stacks under the compose root
+# Discovers deployable stacks and hashes their tracked files for change detection
 from __future__ import annotations
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ log = logging.getLogger("docker_operator.stacks")
 COMPOSE_FILE = "compose.yaml"
 ENV_CONFIG_FILE = ".env.config"
 ENV_SECRETS_FILE = ".env.secrets.encrypted"
+TRACKED_FILES = (COMPOSE_FILE, ENV_CONFIG_FILE, ENV_SECRETS_FILE)
 
 
 # A discovered stack's name and directory, exposing paths to its tracked files
@@ -43,3 +45,14 @@ def discover_stacks(compose_root: Path) -> dict[str, Stack]:
             continue
         stacks[entry.name] = Stack(name=entry.name, path=entry)
     return stacks
+
+
+# Hash the files that affect deployment output (.env.secrets.example is excluded, it's documentation only)
+def stack_hash(stack: Stack) -> str:
+    h = hashlib.sha256()
+    for fname in TRACKED_FILES:
+        f = stack.path / fname
+        h.update(fname.encode() + b"\0")
+        h.update(f.read_bytes() if f.is_file() else b"<missing>")
+        h.update(b"\0")
+    return h.hexdigest()
