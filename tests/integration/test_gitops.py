@@ -56,6 +56,23 @@ def test_hard_reset_discards_local_modifications(git_repo: Path, tmp_path: Path)
     assert (dest / "compose" / "another").is_dir()
 
 
+def test_unreachable_remote_falls_back_to_last_known_good(git_repo: Path, tmp_path: Path):
+    dest = tmp_path / "dest"
+    head1, synced1 = sync_repo(str(git_repo), "main", dest)
+    assert synced1 is True
+
+    moved_away = git_repo.parent / "moved-away"
+    git_repo.rename(moved_away)
+    try:
+        head2, synced2 = sync_repo(str(git_repo), "main", dest)
+        assert synced2 is False
+        # Kept exactly what was there, didn't touch anything
+        assert head2 == head1
+    finally:
+        # Restore for any later fixture teardown
+        moved_away.rename(git_repo)
+
+
 def test_first_clone_failure_raises_when_no_previous_checkout(tmp_path: Path):
     dest = tmp_path / "dest"
     with pytest.raises(subprocess.CalledProcessError):
