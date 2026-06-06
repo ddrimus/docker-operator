@@ -51,3 +51,7 @@ def up(compose_file: Path, env_file: Path, project: str, project_dir: Path, *, p
     if pull:
         _run(base + ["pull", "--quiet"], timeout)
     _run(base + ["up", "-d", "--remove-orphans"], timeout)
+
+
+def down(compose_file: Path, env_file: Path, project: str, project_dir: Path, timeout: int) -> None:
+    _run(_base_args(compose_file, env_file, project, project_dir) + ["down"], timeout)
