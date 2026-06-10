@@ -34,6 +34,14 @@ def test_up_skips_pull_when_pull_false():
     assert "--remove-orphans" in calls[0]
 
 
+def test_down_calls_docker_compose_down():
+    with patch("subprocess.run", return_value=_completed()) as mock_run:
+        compose.down(Path("c.yaml"), Path(".env"), "proj", Path("."), timeout=30)
+    args = mock_run.call_args.args[0]
+    assert args[:2] == ["docker", "compose"]
+    assert "down" in args
+
+
 def test_resolve_config_returns_stdout():
     with patch("subprocess.run", return_value=_completed(stdout='{"networks":{}}')):
         result = compose.resolve_config(Path("c.yaml"), Path(".env"), "proj", Path("."), timeout=30)
