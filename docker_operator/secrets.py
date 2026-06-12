@@ -1,0 +1,74 @@
+# Renders a stack's .env file by merging config and sops-decrypted secrets
+from __future__ import annotations
+import logging
+import os
+import subprocess
+from pathlib import Path
+
+from .stacks import Stack
+
+log = logging.getLogger("docker_operator.secrets")
+
+CONFIG_HEADER = "# ---- from .env.config ----"
+SECRETS_HEADER = "# ---- from .env.secrets.encrypted (decrypted via sops+age) ----"
+
+
+# Decrypt a stack's sops-encrypted secrets to dotenv text (sops doesn't round-trip comments, see getsops/sops#1831)
+def _decrypt_secrets(stack: Stack, age_key_file: Path) -> str:
+    env = os.environ.copy()
+    env["SOPS_AGE_KEY_FILE"] = str(age_key_file)
+    try:
+        proc = subprocess.run(
+            ["sops", "--decrypt", "--input-type", "dotenv", "--output-type", "dotenv",
+             str(stack.env_secrets_file)],
+            capture_output=True, text=True, timeout=30, env=env, check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.error("sops decrypt failed for stack '%s' (exit=%s)", stack.name, exc.returncode)
+        raise
+    except subprocess.TimeoutExpired:
+        log.error("sops decrypt timed out for stack '%s'", stack.name)
+        raise
+    return proc.stdout
+
+
+# Concatenate .env.config then decrypted .env.secrets.encrypted under headers; last-definition-wins gives secrets precedence over config
+def render_env_file(stack: Stack, age_key_file: Path | None, dest: Path) -> None:
+    sections: list[str] = []
+
+    if stack.env_config_file.is_file():
+        text = stack.env_config_file.read_text().rstrip("\n")
+        sections.append(f"{CONFIG_HEADER}\n{text}")
+
+    if stack.env_secrets_file.is_file():
+        if age_key_file is None:
+            raise RuntimeError(
+                f"{stack.env_secrets_file.name} exists for stack '{stack.name}' but "
+                "SOPS_AGE_KEY_FILE is not configured"
+            )
+        text = _decrypt_secrets(stack, age_key_file).rstrip("\n")
+        sections.append(f"{SECRETS_HEADER}\n{text}")
+
+    content = ("\n\n".join(sections) + "\n") if sections else ""
+
+    dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # dest may be literally ".env": with_suffix() is unsafe here
+    tmp = dest.with_name(dest.name + ".tmp")
+
+    # Create the file with 0600 at creation time so decrypted secrets never sit with looser default permissions; O_EXCL also refuses a pre-existing symlink
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+
+    var_count = sum(
+        1 for line in content.splitlines()
+        if line.strip() and not line.lstrip().startswith("#") and "=" in line
+    )
+    log.info("stack '%s': wrote .env (%d section(s), ~%d variables), values never logged",
+              stack.name, len(sections), var_count)
