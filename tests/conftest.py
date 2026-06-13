@@ -42,3 +42,28 @@ def add_stack(repo: Path, name: str, *, compose: str = None, env_config: str = N
     if commit:
         _git(["add", "-A"], repo)
         _git(["commit", "-m", f"add/update stack {name}"], repo)
+
+
+# Generate a real age keypair via age-keygen
+@pytest.fixture
+def age_key(tmp_path: Path) -> tuple[Path, str]:
+    key_file = tmp_path / "age.key"
+    proc = subprocess.run(["age-keygen", "-o", str(key_file)], capture_output=True, text=True, check=True)
+    pub = None
+    for line in (proc.stderr or "").splitlines():
+        if "public key:" in line.lower():
+            pub = line.split(":", 1)[1].strip()
+    assert pub, f"could not parse age public key from age-keygen output: {proc.stderr!r}"
+    return key_file, pub
+
+
+# Encrypt dotenv text via a real sops+age round trip, for realistic .env.secrets.encrypted fixtures
+def encrypt_dotenv(plaintext: str, age_key_file: Path, age_public_key: str, tmp_path: Path) -> bytes:
+    plain = tmp_path / f"plain-{abs(hash(plaintext))}.env"
+    plain.write_text(plaintext)
+    proc = subprocess.run(
+        ["sops", "--input-type", "dotenv", "--output-type", "dotenv", "--encrypt",
+         "--age", age_public_key, str(plain)],
+        capture_output=True, text=True, check=True,
+    )
+    return proc.stdout.encode()
