@@ -1,4 +1,4 @@
-# Derives docker network ownership from compose config
+# Derives docker network ownership and stack deploy ordering from compose config
 from __future__ import annotations
 import json
 import logging
@@ -25,3 +25,23 @@ def parse_networks(config_json: str) -> tuple[set[str], set[str]]:
             is_external = True
         (external if is_external else owned).add(actual)
     return owned, external
+
+
+# Order stacks via Kahn's algorithm, falling back to the given order on a dependency cycle
+def topo_order(names: list[str], depends_on: dict[str, set[str]]) -> list[str]:
+    remaining = {n: set(depends_on.get(n, ())) & set(names) for n in names}
+    ordered: list[str] = []
+    pending = list(names)
+    while pending:
+        ready = [n for n in pending if not remaining[n]]
+        if not ready:
+            log.warning("stack dependency cycle detected among %s, using original order", pending)
+            ordered.extend(pending)
+            break
+        ready.sort(key=names.index)
+        for n in ready:
+            ordered.append(n)
+            pending.remove(n)
+            for other in pending:
+                remaining[other].discard(n)
+    return ordered
