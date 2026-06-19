@@ -3,7 +3,7 @@ name = "docker-operator"
 version = "0.1.0"
 description = "Minimal GitOps-style deployer for docker compose stacks, triggered by git webhooks"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["apprise>=1.9"]
 
 [project.optional-dependencies]
 # Test-only; requires `git`, `sops`, and `age-keygen` on PATH
