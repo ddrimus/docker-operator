@@ -7,6 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from docker_operator.config import Settings  # noqa: E402
+
 
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
@@ -67,3 +69,30 @@ def encrypt_dotenv(plaintext: str, age_key_file: Path, age_public_key: str, tmp_
         capture_output=True, text=True, check=True,
     )
     return proc.stdout.encode()
+
+
+def make_settings(tmp_path: Path, *, git_repo_url: str, sops_age_key_file: Path | None = None,
+                   **overrides) -> Settings:
+    defaults = dict(
+        webhook_secret="test-secret",
+        git_repo_url=git_repo_url,
+        git_branch="main",
+        data_dir=tmp_path / "data",
+        deploy_dir=tmp_path / "deploy",
+        compose_subdir="compose",
+        sops_age_key_file=sops_age_key_file,
+        listen_host="127.0.0.1",
+        listen_port=0,
+        webhook_path="/webhook",
+        pull_images=False,
+        prune_removed_stacks=False,
+        poll_interval_seconds=0,
+        deploy_timeout_seconds=30,
+        notify_webhook_url=None,
+        log_level="INFO",
+    )
+    defaults.update(overrides)
+    return Settings(**defaults)
+
+
+# Everything below is e2e-only; everything above must keep working with no docker daemon present
