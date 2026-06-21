@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+import shutil
 from contextlib import contextmanager
 
 from . import compose, secrets, state as state_mod
@@ -89,11 +90,12 @@ def _reconcile_locked(settings: Settings) -> None:
 
     changed = [(stk, h) for name, stk in current.items()
                if (h := stack_hash(stk)) != known.get(name, {}).get("hash")]
+    removed = [name for name in known if name not in current]
 
-    if not changed:
+    if not changed and not removed:
         log.info("reconcile: no changes (%d stacks up to date)", len(current))
         return
-    log.info("reconcile: %d changed", len(changed))
+    log.info("reconcile: %d changed, %d removed", len(changed), len(removed))
 
     for stk, new_hash in changed:
         deploy_path = _deploy_path(settings, stk.name)
@@ -112,3 +114,28 @@ def _reconcile_locked(settings: Settings) -> None:
         except Exception as exc:
             detail = exc_detail(exc)
             log.error("stack '%s' failed to deploy: %s", stk.name, detail)
+
+    if removed:
+        if settings.prune_removed_stacks:
+            for name in removed:
+                deploy_path = _deploy_path(settings, name)
+                compose_file = deploy_path / "compose.yaml"
+                env_file = deploy_path / ".env"
+                if not compose_file.is_file():
+                    # Nothing on disk to tear down; stop tracking it so this doesn't get re-logged on every future reconcile
+                    log.warning("stack '%s' removed from repo, nothing on disk to tear down, dropping from state",
+                                name)
+                    known.pop(name, None)
+                    state_mod.save(settings.state_file, st)
+                    continue
+                try:
+                    log.warning("stack '%s' removed from repo, tearing down", name)
+                    compose.down(compose_file, env_file, name, deploy_path, settings.deploy_timeout_seconds)
+                    del known[name]
+                    state_mod.save(settings.state_file, st)
+                    shutil.rmtree(deploy_path, ignore_errors=True)
+                except Exception as exc:
+                    detail = exc_detail(exc)
+                    log.error("failed to tear down '%s': %s", name, detail)
+        else:
+            log.warning("stack(s) removed from repo, PRUNE_REMOVED_STACKS=false, left on disk: %s", removed)
