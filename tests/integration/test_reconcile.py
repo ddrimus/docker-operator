@@ -123,6 +123,46 @@ def test_missing_age_key_with_secrets_file_fails_that_stack_only(git_repo, tmp_p
     assert "needs-secrets" not in st["stacks"]
 
 
+def test_removed_stack_left_alone_when_prune_disabled(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=False)
+    reconcile(settings)
+    deployed.clear()
+
+    import subprocess
+    (git_repo / "compose" / "temp").rename(git_repo / "compose" / "temp.bak")
+    import shutil
+    shutil.rmtree(git_repo / "compose" / "temp.bak")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings)
+
+    assert ("down", "temp") not in deployed
+    st = state_mod.load(settings.state_file)
+    # Still tracked as "should be running"
+    assert "temp" in st["stacks"]
+
+
+def test_removed_stack_torn_down_when_prune_enabled(git_repo, tmp_path, deployed):
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
+    reconcile(settings)
+    deployed.clear()
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings)
+
+    assert ("down", "temp") in deployed
+    st = state_mod.load(settings.state_file)
+    assert "temp" not in st["stacks"]
+    assert not (settings.deploy_dir / "temp").exists()
+
+
 def test_reconcile_lock_is_released_after_call_allows_second_call(git_repo, tmp_path, deployed):
     add_stack(git_repo, "traefik")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
@@ -152,3 +192,24 @@ def test_self_heals_after_remote_becomes_unreachable_then_recovers(git_repo, tmp
     # forgejo "back up": picks up what changed while it was down
     reconcile(settings)
     assert deployed == [("up", "forgejo")]
+
+
+def test_teardown_skipped_when_nothing_promoted_to_disk_yet(git_repo, tmp_path, deployed):
+    # A stack tracked in state whose compose.yaml was never promoted (deleted out-of-band) must just stop being tracked, not attempt `compose down`
+    import subprocess, shutil
+    add_stack(git_repo, "ghost")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
+    reconcile(settings)
+    deployed.clear()
+
+    (settings.deploy_dir / "ghost" / "compose.yaml").unlink()
+
+    shutil.rmtree(git_repo / "compose" / "ghost")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove ghost"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings)
+
+    assert ("down", "ghost") not in deployed
+    st = state_mod.load(settings.state_file)
+    assert "ghost" not in st["stacks"]
