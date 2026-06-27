@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from . import compose, secrets, state as state_mod
 from .config import Settings
 from .gitops import sync_repo
+from .notify import notify
 from .stacks import Stack, discover_stacks, stack_hash
 from .util import exc_detail
 
@@ -80,6 +81,8 @@ def _reconcile_locked(settings: Settings) -> None:
     except Exception as exc:
         detail = exc_detail(exc)
         log.error("cannot reach %s and no previous checkout exists yet: %s", settings.git_repo_url, detail)
+        notify(settings.notify_webhook_url,
+               f"docker-operator: cannot reach {settings.git_repo_url} and no cached checkout exists: {detail}")
         return
     if not synced:
         log.info("forgejo unreachable, reconciling against last known-good checkout (%s)", head[:12])
@@ -104,6 +107,7 @@ def _reconcile_locked(settings: Settings) -> None:
         except Exception as exc:
             detail = exc_detail(exc)
             log.error("stack '%s' failed validation: %s", stk.name, detail)
+            notify(settings.notify_webhook_url, f"docker-operator: `{stk.name}` failed to validate: {detail}")
             continue
         try:
             log.info("deploying stack '%s'", stk.name)
@@ -114,6 +118,7 @@ def _reconcile_locked(settings: Settings) -> None:
         except Exception as exc:
             detail = exc_detail(exc)
             log.error("stack '%s' failed to deploy: %s", stk.name, detail)
+            notify(settings.notify_webhook_url, f"docker-operator: `{stk.name}` failed to deploy: {detail}")
 
     if removed:
         if settings.prune_removed_stacks:
@@ -137,5 +142,6 @@ def _reconcile_locked(settings: Settings) -> None:
                 except Exception as exc:
                     detail = exc_detail(exc)
                     log.error("failed to tear down '%s': %s", name, detail)
+                    notify(settings.notify_webhook_url, f"docker-operator: failed to tear down `{name}`: {detail}")
         else:
             log.warning("stack(s) removed from repo, PRUNE_REMOVED_STACKS=false, left on disk: %s", removed)
