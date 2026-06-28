@@ -163,6 +163,17 @@ def test_removed_stack_torn_down_when_prune_enabled(git_repo, tmp_path, deployed
     assert not (settings.deploy_dir / "temp").exists()
 
 
+def test_unreachable_git_with_no_previous_checkout_notifies_and_returns_cleanly(tmp_path, deployed):
+    settings = make_settings(tmp_path, git_repo_url=str(tmp_path / "no-such-repo"))
+    notified = []
+    with patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+        # Must not raise
+        reconcile(settings)
+    assert deployed == []
+    assert len(notified) == 1
+    assert "cannot reach" in notified[0]
+
+
 def test_reconcile_lock_is_released_after_call_allows_second_call(git_repo, tmp_path, deployed):
     add_stack(git_repo, "traefik")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
@@ -171,6 +182,22 @@ def test_reconcile_lock_is_released_after_call_allows_second_call(git_repo, tmp_
     reconcile(settings)
     # Reaching here at all proves the lock was released
     assert True
+
+
+def test_deploy_failure_notification_includes_stderr_detail(git_repo, tmp_path):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    from docker_operator.compose import DeployError
+
+    notified = []
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up",
+               side_effect=DeployError("command failed: ...", stderr="port 80 already allocated\n")), \
+         patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    assert "port 80 already allocated" in notified[0]
 
 
 def test_self_heals_after_remote_becomes_unreachable_then_recovers(git_repo, tmp_path, deployed):
@@ -213,3 +240,29 @@ def test_teardown_skipped_when_nothing_promoted_to_disk_yet(git_repo, tmp_path, 
     assert ("down", "ghost") not in deployed
     st = state_mod.load(settings.state_file)
     assert "ghost" not in st["stacks"]
+
+
+def test_teardown_failure_notifies_and_keeps_state_for_retry(git_repo, tmp_path):
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
+        reconcile(settings)
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    notified = []
+    from docker_operator.compose import DeployError
+    with patch("docker_operator.compose.down", side_effect=DeployError("down failed", stderr="container busy\n")), \
+         patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    assert "container busy" in notified[0]
+    st = state_mod.load(settings.state_file)
+    # Kept for retry, not silently dropped
+    assert "temp" in st["stacks"]
