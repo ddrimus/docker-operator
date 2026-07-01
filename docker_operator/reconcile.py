@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from . import compose, secrets, state as state_mod
 from .config import Settings
 from .gitops import sync_repo
+from .networks import parse_networks, topo_order
 from .notify import notify
 from .stacks import Stack, discover_stacks, stack_hash
 from .util import exc_detail
@@ -42,13 +43,14 @@ def _stage(settings: Settings, stk: Stack, deploy_path) -> tuple:
     try:
         secrets.render_env_file(stk, settings.sops_age_key_file, staged_env)
         staged_compose.write_bytes(stk.compose_file.read_bytes())
-        compose.resolve_config(staged_compose, staged_env, stk.name, deploy_path,
-                                settings.deploy_timeout_seconds)
+        config_json = compose.resolve_config(staged_compose, staged_env, stk.name, deploy_path,
+                                              settings.deploy_timeout_seconds)
     except Exception:
         staged_env.unlink(missing_ok=True)
         staged_compose.unlink(missing_ok=True)
         raise
-    return staged_compose, staged_env
+    owned, external = parse_networks(config_json)
+    return staged_compose, staged_env, owned, external
 
 
 # Apply the staged config via `docker compose up`, promoting it to the canonical files only once `up` succeeds
@@ -100,25 +102,45 @@ def _reconcile_locked(settings: Settings) -> None:
         return
     log.info("reconcile: %d changed, %d removed", len(changed), len(removed))
 
+    # Phase A: stage + validate every changed stack, discover network roles
+    staged: dict[str, tuple] = {}
+    owners: dict[str, str] = {}
+    needs: dict[str, set[str]] = {}
     for stk, new_hash in changed:
         deploy_path = _deploy_path(settings, stk.name)
         try:
-            staged_compose, staged_env = _stage(settings, stk, deploy_path)
+            staged_compose, staged_env, owned, external = _stage(settings, stk, deploy_path)
         except Exception as exc:
             detail = exc_detail(exc)
             log.error("stack '%s' failed validation: %s", stk.name, detail)
             notify(settings.notify_webhook_url, f"docker-operator: `{stk.name}` failed to validate: {detail}")
             continue
+        for n in owned:
+            owners.setdefault(n, stk.name)
+        needs[stk.name] = external
+        staged[stk.name] = (stk, staged_compose, staged_env, new_hash)
+
+    # Phase B: order deploys so a stack that owns a network goes before any other changed stack that depends on it as external
+    depends_on = {
+        name: {owners[n] for n in ext if n in owners and owners[n] != name}
+        for name, ext in needs.items()
+    }
+    order = topo_order(list(staged.keys()), depends_on)
+
+    # Phase C: apply each staged stack and promote it only once `up` succeeds
+    for name in order:
+        stk, staged_compose, staged_env, new_hash = staged[name]
+        deploy_path = _deploy_path(settings, name)
         try:
-            log.info("deploying stack '%s'", stk.name)
-            _promote_and_up(settings, stk.name, deploy_path, staged_compose, staged_env)
-            known[stk.name] = {"hash": new_hash}
+            log.info("deploying stack '%s'", name)
+            _promote_and_up(settings, name, deploy_path, staged_compose, staged_env)
+            known[name] = {"hash": new_hash}
             state_mod.save(settings.state_file, st)
-            log.info("stack '%s' deployed OK -> %s", stk.name, deploy_path)
+            log.info("stack '%s' deployed OK -> %s", name, deploy_path)
         except Exception as exc:
             detail = exc_detail(exc)
-            log.error("stack '%s' failed to deploy: %s", stk.name, detail)
-            notify(settings.notify_webhook_url, f"docker-operator: `{stk.name}` failed to deploy: {detail}")
+            log.error("stack '%s' failed to deploy: %s", name, detail)
+            notify(settings.notify_webhook_url, f"docker-operator: `{name}` failed to deploy: {detail}")
 
     if removed:
         if settings.prune_removed_stacks:
