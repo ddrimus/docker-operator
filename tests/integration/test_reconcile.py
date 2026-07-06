@@ -123,6 +123,28 @@ def test_missing_age_key_with_secrets_file_fails_that_stack_only(git_repo, tmp_p
     assert "needs-secrets" not in st["stacks"]
 
 
+def test_network_owner_deployed_before_dependent(git_repo, tmp_path):
+    add_stack(git_repo, "traefik")
+    add_stack(git_repo, "forgejo")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        if project == "traefik":
+            return json.dumps({"networks": {"proxy": {"name": "proxy"}}})
+        return json.dumps({"networks": {"proxy": {"name": "proxy", "external": True}}})
+
+    calls: list[str] = []
+
+    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout):
+        calls.append(project)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=fake_up):
+        reconcile(settings)
+
+    assert calls.index("traefik") < calls.index("forgejo")
+
+
 def test_removed_stack_left_alone_when_prune_disabled(git_repo, tmp_path, deployed):
     add_stack(git_repo, "temp")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=False)
