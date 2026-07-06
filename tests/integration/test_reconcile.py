@@ -185,6 +185,40 @@ def test_removed_stack_torn_down_when_prune_enabled(git_repo, tmp_path, deployed
     assert not (settings.deploy_dir / "temp").exists()
 
 
+def test_force_single_stack_redeploys_even_when_unchanged(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    reconcile(settings, force={"traefik"})
+
+    assert deployed == [("up", "traefik")]
+
+
+def test_force_all_redeploys_every_stack(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "a")
+    add_stack(git_repo, "b")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    reconcile(settings, force={"all"})
+
+    assert {p for _, p in deployed} == {"a", "b"}
+
+
+def test_force_unrelated_stack_name_does_not_affect_others(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "a")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    reconcile(settings, force={"nonexistent-stack"})
+
+    assert deployed == []
+
+
 def test_unreachable_git_with_no_previous_checkout_notifies_and_returns_cleanly(tmp_path, deployed):
     settings = make_settings(tmp_path, git_repo_url=str(tmp_path / "no-such-repo"))
     notified = []
