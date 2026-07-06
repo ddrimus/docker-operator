@@ -72,12 +72,12 @@ def _promote_and_up(settings: Settings, name: str, deploy_path, staged_compose, 
     final_env.chmod(0o600)
 
 
-def reconcile(settings: Settings) -> None:
+def reconcile(settings: Settings, force: set[str] | None = None) -> None:
     with _reconcile_lock(settings):
-        _reconcile_locked(settings)
+        _reconcile_locked(settings, force)
 
 
-def _reconcile_locked(settings: Settings) -> None:
+def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
     try:
         head, synced = sync_repo(settings.git_repo_url, settings.git_branch, settings.repo_dir)
     except Exception as exc:
@@ -91,6 +91,13 @@ def _reconcile_locked(settings: Settings) -> None:
 
     st = state_mod.load(settings.state_file)
     known: dict = st.setdefault("stacks", {})
+    if force:
+        force_all = "all" in force
+        for name in list(known):
+            if force_all or name in force:
+                known.pop(name, None)
+        log.warning("forced redeploy of all stacks (state cleared)" if force_all
+                    else f"forced redeploy of: {', '.join(sorted(force))}")
     current = discover_stacks(settings.compose_root)
 
     changed = [(stk, h) for name, stk in current.items()
