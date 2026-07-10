@@ -9,6 +9,9 @@ dependencies = []
 # Test-only; requires `git`, `sops`, and `age-keygen` on PATH
 test = ["pytest>=8", "pytest-cov>=5"]
 
+[project.scripts]
+docker-operator = "docker_operator.__main__:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
