@@ -1,7 +1,8 @@
-# HTTP server handling Forgejo webhooks and background reconcile triggers
+# HTTP server handling Forgejo webhooks and periodic/background reconcile triggers
 from __future__ import annotations
 import json
 import logging
+import signal
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,6 +30,13 @@ def _worker_loop(settings: Settings, stop: threading.Event) -> None:
                 reconcile(settings)
             except Exception:
                 log.exception("unhandled error during reconcile")
+
+
+def _poll_loop(settings: Settings, stop: threading.Event) -> None:
+    if settings.poll_interval_seconds <= 0:
+        return
+    while not stop.wait(settings.poll_interval_seconds):
+        request_resync()
 
 
 # Build the webhook request handler bound to this run's settings
@@ -105,3 +113,32 @@ def make_handler(settings: Settings):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+
+def run(settings: Settings) -> None:
+    stop = threading.Event()
+    threading.Thread(target=_worker_loop, args=(settings, stop), daemon=True, name="resync-worker").start()
+    threading.Thread(target=_poll_loop, args=(settings, stop), daemon=True, name="resync-poller").start()
+
+    # Self-heal after downtime / missed webhooks
+    request_resync()
+
+    httpd = _Server((settings.listen_host, settings.listen_port), make_handler(settings))
+
+    def _handle_sigterm(signum, frame) -> None:
+        log.info("received SIGTERM, shutting down")
+        # Calling httpd.shutdown() inline would deadlock since this handler runs on the thread blocked in serve_forever()
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    log.info("listening on %s:%s%s", settings.listen_host, settings.listen_port, settings.webhook_path)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        log.info("received SIGINT, shutting down")
+    finally:
+        stop.set()
+        # No-op if the SIGTERM path already triggered it
+        httpd.shutdown()
+        log.info("shutdown complete")
