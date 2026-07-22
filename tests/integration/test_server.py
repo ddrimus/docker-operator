@@ -259,6 +259,33 @@ def test_worker_loop_survives_reconcile_raising(tmp_path):
     assert len(calls) == 2
 
 
+def test_poll_loop_disabled_when_interval_zero_returns_immediately(tmp_path):
+    settings = make_settings(tmp_path, git_repo_url="https://example.com/x.git", poll_interval_seconds=0)
+    stop = threading.Event()
+    t = threading.Thread(target=server_mod._poll_loop, args=(settings, stop), daemon=True)
+    t.start()
+    t.join(timeout=1)
+    # Returned right away, never looped
+    assert not t.is_alive()
+
+
+def test_poll_loop_triggers_resync_after_interval(tmp_path):
+    settings = make_settings(tmp_path, git_repo_url="https://example.com/x.git", poll_interval_seconds=0)
+    # Settings is frozen
+    object.__setattr__(settings, "poll_interval_seconds", 0.05)
+    stop = threading.Event()
+    server_mod._resync_event.clear()
+
+    t = threading.Thread(target=server_mod._poll_loop, args=(settings, stop), daemon=True)
+    t.start()
+    triggered = server_mod._resync_event.wait(timeout=2)
+    stop.set()
+    t.join(timeout=2)
+
+    assert triggered
+    server_mod._resync_event.clear()
+
+
 def test_malformed_content_length_header_returns_400(running_server):
     # urllib computes Content-Length itself and won't send a garbage one, so a raw socket is needed to exercise this branch
     import socket
