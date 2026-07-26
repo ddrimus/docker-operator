@@ -1,4 +1,5 @@
 from __future__ import annotations
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -6,8 +7,15 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# --import-mode=importlib (see pyproject.toml) doesn't auto-add this dir, so add it explicitly for `from conftest import ...` to resolve
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from docker_operator import compose  # noqa: E402
 from docker_operator.config import Settings  # noqa: E402
+
+# Skip collecting tests/e2e/ entirely when docker isn't on PATH, and keep a single shared conftest.py so `from conftest import ...` stays unambiguous
+if shutil.which("docker") is None:
+    collect_ignore_glob = ["e2e/test_*.py"]
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -96,3 +104,23 @@ def make_settings(tmp_path: Path, *, git_repo_url: str, sops_age_key_file: Path 
 
 
 # Everything below is e2e-only; everything above must keep working with no docker daemon present
+
+# Track (deploy_path, project) pairs an e2e test deployed for real, and tear each down after the test regardless of pass/fail
+@pytest.fixture
+def real_docker_cleanup():
+    registered: list[tuple[Path, str]] = []
+
+    def register(deploy_path: Path, project: str) -> None:
+        registered.append((deploy_path, project))
+
+    yield register
+
+    for deploy_path, project in registered:
+        compose_file = deploy_path / "compose.yaml"
+        env_file = deploy_path / ".env"
+        if not compose_file.is_file():
+            continue
+        try:
+            compose.down(compose_file, env_file, project, deploy_path, timeout=60)
+        except Exception as exc:
+            print(f"WARNING: e2e cleanup failed for project {project!r}: {exc}")
