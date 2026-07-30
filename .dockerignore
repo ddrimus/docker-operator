@@ -1,0 +1,24 @@
+# VCS and CI metadata
+.git
+.forgejo
+.gitignore
+
+# Repo docs, not needed at runtime
+README.md
+
+# Test suite and its cached output
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local env files, keep only the checked-in template
+*.env
+!example.env
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local virtualenv
+venv/
