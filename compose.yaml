@@ -1,0 +1,40 @@
+services:
+  docker-operator:
+    build: .
+    container_name: docker-operator
+    networks:
+      - "forgejo"
+    # Ceiling, not a tuning target: raise mem_limit if a stack's `docker compose config` resolution needs more headroom
+    mem_limit: "256m"
+    cpus: "0.5"
+    # Docker's json-file driver has no size cap by default, and this process logs continuously for its entire uptime
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      WEBHOOK_SECRET: "${WEBHOOK_SECRET}"
+      GIT_REPO_URL: "${GIT_REPO_URL}"
+      GIT_BRANCH: "${GIT_BRANCH}"
+      COMPOSE_SUBDIR: "${COMPOSE_SUBDIR}"
+      SOPS_AGE_KEY_FILE: "${SOPS_AGE_KEY_FILE}"
+      WEBHOOK_PATH: "${WEBHOOK_PATH}"
+      PULL_IMAGES: "${PULL_IMAGES}"
+      PRUNE_REMOVED_STACKS: "${PRUNE_REMOVED_STACKS}"
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS}"
+      LOG_LEVEL: "${LOG_LEVEL}"
+      DEPLOY_TIMEOUT_SECONDS: "${DEPLOY_TIMEOUT_SECONDS}"
+      NOTIFY_WEBHOOK_URL: "${NOTIFY_WEBHOOK_URL}"
+    volumes:
+      - "./data/data:/data"
+      - "./data/deploy:/deploy"
+      - "./data/sops/age.key:/run/secrets/age_key:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      # The single repo's bare .git directory, read-only, only needed if GIT_REPO_URL is a local path; replace <owner>/<repo>.git with the real path
+      - "/path/to/forgejo/data/git/repositories/<owner>/<repo>.git:/mnt/forgejo-repo:ro"
+    restart: unless-stopped
+
+networks:
+  forgejo:
+    external: true
