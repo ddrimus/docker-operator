@@ -18,14 +18,18 @@ RUN apk add --no-cache curl ca-certificates \
 FROM python:3.14.7-alpine3.24
 
 # Runs as root deliberately: docker.sock access is already root-equivalent regardless of UID, so a non-root user adds no real isolation here
-RUN apk add --no-cache git docker-cli docker-cli-compose ca-certificates
+# apk upgrade pulls in security backports already published for this alpine branch (e.g. libuuid/util-linux) that predate this base image build
+RUN apk upgrade --no-cache \
+    && apk add --no-cache git docker-cli docker-cli-compose ca-certificates
 
 COPY --from=builder /usr/local/bin/sops /usr/local/bin/sops
 
 WORKDIR /app
 COPY docker_operator ./docker_operator
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir . \
+# pip/setuptools/msgpack ship pinned in the base image and lag its own security fixes
+RUN pip install --no-cache-dir --upgrade pip setuptools msgpack \
+    && pip install --no-cache-dir . \
     && rm -rf /app/pyproject.toml /root/.cache
 
 ENV DATA_DIR=/data DEPLOY_DIR=/deploy LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080
