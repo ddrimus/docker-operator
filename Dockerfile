@@ -1,5 +1,5 @@
 # ---- builder: only this stage needs curl, it never reaches the final image ----
-FROM python:3.12.14-alpine3.24 AS builder
+FROM python:3.14.7-alpine3.24 AS builder
 
 # sha256 checksums pinned from upstream's own sops-v3.13.3.checksums.txt, verified out-of-band since this binary handles every stack's secrets
 ARG SOPS_VERSION=3.13.3
@@ -15,7 +15,7 @@ RUN apk add --no-cache curl ca-certificates \
     && chmod +x /usr/local/bin/sops
 
 # ---- final: only what's needed to run, no curl, no build tooling ----
-FROM python:3.12.14-alpine3.24
+FROM python:3.14.7-alpine3.24
 
 # Runs as root deliberately: docker.sock access is already root-equivalent regardless of UID, so a non-root user adds no real isolation here
 RUN apk add --no-cache git docker-cli docker-cli-compose ca-certificates
