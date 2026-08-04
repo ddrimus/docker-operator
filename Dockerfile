@@ -19,8 +19,11 @@ FROM python:3.14.7-alpine3.24
 
 # Runs as root deliberately: docker.sock access is already root-equivalent regardless of UID, so a non-root user adds no real isolation here
 # apk upgrade pulls in security backports already published for this alpine branch (e.g. libuuid/util-linux) that predate this base image build
+# bind-mounted repos under /repository are owned by the host, which git's dubious-ownership check
+# otherwise rejects; trust that whole prefix so any mounted repo folder works without extra config
 RUN apk upgrade --no-cache \
-    && apk add --no-cache git docker-cli docker-cli-compose ca-certificates
+    && apk add --no-cache git docker-cli docker-cli-compose ca-certificates \
+    && git config --system --add safe.directory '/repository/*'
 
 COPY --from=builder /usr/local/bin/sops /usr/local/bin/sops
 
