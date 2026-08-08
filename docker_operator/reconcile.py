@@ -12,7 +12,7 @@ from .gitops import sync_repo
 from .networks import parse_networks, topo_order
 from .notify import notify
 from .stacks import Stack, discover_stacks, stack_hash
-from .util import exc_detail
+from .util import chown_recursive, exc_detail
 
 log = logging.getLogger("docker_operator.reconcile")
 
@@ -50,6 +50,8 @@ def _stage(settings: Settings, stk: Stack, deploy_path) -> tuple:
         staged_compose.unlink(missing_ok=True)
         raise
     owned, external = parse_networks(config_json)
+    # Ownership transfers through the later staged_*.replace(final_*) rename, so this is the only chown needed
+    chown_recursive(deploy_path, settings.deploy_uid, settings.deploy_gid)
     return staged_compose, staged_env, owned, external
 
 
