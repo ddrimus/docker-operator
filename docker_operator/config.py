@@ -32,6 +32,17 @@ def _env_int(name: str, default: int) -> int:
         sys.exit(1)
 
 
+def _env_optional_int(name: str) -> int | None:
+    val = os.environ.get(name)
+    if val is None or val == "":
+        return None
+    try:
+        return int(val)
+    except ValueError:
+        print(f"FATAL: {name} must be an integer, got {val!r}", file=sys.stderr)
+        sys.exit(1)
+
+
 # Return the local filesystem path if GIT_REPO_URL is a bind-mounted repo rather than a network URL, so a missing mount fails fast at startup
 def local_repo_path(url: str) -> Path | None:
     if url.startswith("file://"):
@@ -49,6 +60,8 @@ class Settings:
     git_branch: str
     data_dir: Path
     deploy_dir: Path
+    deploy_uid: int | None
+    deploy_gid: int | None
     compose_subdir: str
     sops_age_key_file: Path | None
     listen_host: str
@@ -101,6 +114,8 @@ def load_settings() -> Settings:
         git_branch=_env("GIT_BRANCH", "main"),
         data_dir=data_dir,
         deploy_dir=deploy_dir,
+        deploy_uid=_env_optional_int("DEPLOY_UID"),
+        deploy_gid=_env_optional_int("DEPLOY_GID"),
         compose_subdir=_env("COMPOSE_SUBDIR", "compose"),
         sops_age_key_file=sops_key,
         listen_host=_env("LISTEN_HOST", "0.0.0.0"),

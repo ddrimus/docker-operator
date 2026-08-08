@@ -87,6 +87,8 @@ def make_settings(tmp_path: Path, *, git_repo_url: str, sops_age_key_file: Path 
         git_branch="main",
         data_dir=tmp_path / "data",
         deploy_dir=tmp_path / "deploy",
+        deploy_uid=None,
+        deploy_gid=None,
         compose_subdir="compose",
         sops_age_key_file=sops_age_key_file,
         listen_host="127.0.0.1",

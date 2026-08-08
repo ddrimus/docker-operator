@@ -9,6 +9,7 @@ import urllib.request
 from .config import load_settings
 from .reconcile import reconcile
 from .server import run
+from .util import chown_recursive
 
 
 # Container HEALTHCHECK probe; skips load_settings() so an unrelated config error doesn't make Docker think the server is down
@@ -50,6 +51,9 @@ def main() -> None:
     settings.data_dir.chmod(0o700)
     settings.deploy_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings.deploy_dir.chmod(0o700)
+    # DEPLOY_UID/DEPLOY_GID let a host user own DEPLOY_DIR outright (not just its contents) so it's
+    # `cd`-able and `docker compose`-able as themselves; unset (the default) leaves it root-owned
+    chown_recursive(settings.deploy_dir, settings.deploy_uid, settings.deploy_gid)
 
     if args.once:
         reconcile(settings, force=set(args.force) or None)

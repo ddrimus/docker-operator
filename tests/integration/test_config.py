@@ -74,6 +74,28 @@ def test_defaults_when_optional_vars_unset(monkeypatch):
     assert s.log_level == "INFO"
 
 
+def test_deploy_uid_gid_default_to_none(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.delenv("DEPLOY_UID", raising=False)
+    monkeypatch.delenv("DEPLOY_GID", raising=False)
+    s = load_settings()
+    assert s.deploy_uid is None
+    assert s.deploy_gid is None
+
+
+def test_deploy_uid_gid_parsed_when_set(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_UID="1000", DEPLOY_GID="1001")
+    s = load_settings()
+    assert s.deploy_uid == 1000
+    assert s.deploy_gid == 1001
+
+
+def test_invalid_deploy_uid_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_UID="not-a-number")
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
 def test_deploy_dir_independent_of_data_dir_when_set(monkeypatch):
     _set_env(monkeypatch, DATA_DIR="/data", DEPLOY_DIR="/deploy")
     s = load_settings()
