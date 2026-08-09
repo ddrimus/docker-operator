@@ -22,7 +22,7 @@ FROM python:3.14.7-alpine3.24
 # bind-mounted repos under /repository are owned by the host, which git's dubious-ownership check
 # otherwise rejects; trust that whole prefix so any mounted repo folder works without extra config
 RUN apk upgrade --no-cache \
-    && apk add --no-cache git docker-cli docker-cli-compose ca-certificates \
+    && apk add --no-cache git docker-cli docker-cli-compose ca-certificates tzdata \
     && git config --system --add safe.directory '/repository/*'
 
 COPY --from=builder /usr/local/bin/sops /usr/local/bin/sops
@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools msgpack \
     && pip install --no-cache-dir . \
     && rm -rf /app/pyproject.toml /root/.cache
 
-ENV DATA_DIR=/data DEPLOY_DIR=/deploy LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080
+ENV DATA_DIR=/data DEPLOY_DIR=/deploy LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080 TZ=UTC
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["python", "-m", "docker_operator", "--healthcheck"]
