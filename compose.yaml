@@ -7,6 +7,7 @@ services:
     networks:
       - "docker-operator"
     environment:
+      TZ: "${TZ}"
       GIT_REPO_URL: "${GIT_REPO_URL}"
       GIT_BRANCH: "${GIT_BRANCH}"
       WEBHOOK_PATH: "${WEBHOOK_PATH}"
