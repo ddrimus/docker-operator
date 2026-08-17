@@ -96,6 +96,22 @@ def test_invalid_deploy_uid_exits_fatal(monkeypatch):
         load_settings()
 
 
+def test_deploy_retry_defaults(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.delenv("DEPLOY_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("DEPLOY_RETRY_DELAY_SECONDS", raising=False)
+    s = load_settings()
+    assert s.deploy_max_retries == 3
+    assert s.deploy_retry_delay_seconds == 60
+
+
+def test_deploy_retry_parsed_when_set(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_MAX_RETRIES="5", DEPLOY_RETRY_DELAY_SECONDS="30")
+    s = load_settings()
+    assert s.deploy_max_retries == 5
+    assert s.deploy_retry_delay_seconds == 30
+
+
 def test_deploy_dir_independent_of_data_dir_when_set(monkeypatch):
     _set_env(monkeypatch, DATA_DIR="/data", DEPLOY_DIR="/deploy")
     s = load_settings()

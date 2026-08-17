@@ -4,6 +4,7 @@ import fcntl
 import logging
 import os
 import shutil
+import time
 from contextlib import contextmanager
 
 from . import compose, secrets, state as state_mod
@@ -15,6 +16,42 @@ from .stacks import Stack, discover_stacks, stack_hash
 from .util import chown_recursive, exc_detail
 
 log = logging.getLogger("docker_operator.reconcile")
+
+
+# True if this attempt at new_hash should run now: never attempted before, still within the retry budget
+# and past the backoff delay, or a different hash than whatever was last failing (a real change resets it)
+def _should_attempt(retries: dict, name: str, new_hash: str, max_retries: int, retry_delay_seconds: int) -> bool:
+    retry = retries.get(name)
+    if retry is None or retry["hash"] != new_hash:
+        return True
+    if retry["attempts"] >= max_retries:
+        return False
+    return (time.time() - retry["last_attempt"]) >= retry_delay_seconds
+
+
+# Record a failed attempt at new_hash, persisting immediately so attempts survive across reconcile passes;
+# kept separate from known/st["stacks"] so "no entry" there keeps meaning "never successfully deployed"
+def _record_failure(settings: Settings, st: dict, retries: dict, name: str, new_hash: str) -> int:
+    retry = retries.get(name)
+    attempts = retry["attempts"] + 1 if retry and retry["hash"] == new_hash else 1
+    retries[name] = {"hash": new_hash, "attempts": attempts, "last_attempt": time.time()}
+    state_mod.save(settings.state_file, st)
+    return attempts
+
+
+# Log and notify a validate/deploy failure, wording it as final once the retry budget for this hash is spent
+def _log_and_notify_failure(settings: Settings, stage: str, name: str, detail: str, attempts: int) -> None:
+    if attempts >= settings.deploy_max_retries:
+        log.error("stack '%s' failed to %s: %s (attempt %d/%d, giving up until it changes)",
+                   name, stage, detail, attempts, settings.deploy_max_retries)
+        notify(settings.notify_webhook_url,
+               f"docker-operator: `{name}` failed to {stage} after {attempts} attempt(s), "
+               f"giving up until it changes: {detail}")
+    else:
+        log.error("stack '%s' failed to %s: %s (attempt %d/%d)",
+                   name, stage, detail, attempts, settings.deploy_max_retries)
+        notify(settings.notify_webhook_url,
+               f"docker-operator: `{name}` failed to {stage} (attempt {attempts}/{settings.deploy_max_retries}): {detail}")
 
 
 # Cross-process advisory lock so a manual `--once` run can't race the server's background worker thread
@@ -93,23 +130,31 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
 
     st = state_mod.load(settings.state_file)
     known: dict = st.setdefault("stacks", {})
+    retries: dict = st.setdefault("retries", {})
     if force:
         force_all = "all" in force
-        for name in list(known):
+        for name in list(known) + list(retries):
             if force_all or name in force:
                 known.pop(name, None)
+                retries.pop(name, None)
         log.warning("forced redeploy of all stacks (state cleared)" if force_all
                     else f"forced redeploy of: {', '.join(sorted(force))}")
     current = discover_stacks(settings.compose_root)
 
-    changed = [(stk, h) for name, stk in current.items()
-               if (h := stack_hash(stk)) != known.get(name, {}).get("hash")]
+    candidates = [(stk, h) for name, stk in current.items()
+                  if (h := stack_hash(stk)) != known.get(name, {}).get("hash")]
+    changed = [(stk, h) for stk, h in candidates
+               if _should_attempt(retries, stk.name, h, settings.deploy_max_retries,
+                                   settings.deploy_retry_delay_seconds)]
+    deferred = len(candidates) - len(changed)
     removed = [name for name in known if name not in current]
 
     if not changed and not removed:
-        log.info("reconcile: no changes (%d stacks up to date)", len(current))
+        suffix = f", {deferred} deferred by retry backoff/limit" if deferred else ""
+        log.info("reconcile: no changes (%d stacks up to date%s)", len(current), suffix)
         return
-    log.info("reconcile: %d changed, %d removed", len(changed), len(removed))
+    log.info("reconcile: %d changed, %d removed%s", len(changed), len(removed),
+              f", {deferred} deferred" if deferred else "")
 
     # Phase A: stage + validate every changed stack, discover network roles
     staged: dict[str, tuple] = {}
@@ -121,8 +166,8 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
             staged_compose, staged_env, owned, external = _stage(settings, stk, deploy_path)
         except Exception as exc:
             detail = exc_detail(exc)
-            log.error("stack '%s' failed validation: %s", stk.name, detail)
-            notify(settings.notify_webhook_url, f"docker-operator: `{stk.name}` failed to validate: {detail}")
+            attempts = _record_failure(settings, st, retries, stk.name, new_hash)
+            _log_and_notify_failure(settings, "validate", stk.name, detail, attempts)
             continue
         for n in owned:
             owners.setdefault(n, stk.name)
@@ -144,12 +189,13 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
             log.info("deploying stack '%s'", name)
             _promote_and_up(settings, name, deploy_path, staged_compose, staged_env)
             known[name] = {"hash": new_hash}
+            retries.pop(name, None)
             state_mod.save(settings.state_file, st)
             log.info("stack '%s' deployed OK -> %s", name, deploy_path)
         except Exception as exc:
             detail = exc_detail(exc)
-            log.error("stack '%s' failed to deploy: %s", name, detail)
-            notify(settings.notify_webhook_url, f"docker-operator: `{name}` failed to deploy: {detail}")
+            attempts = _record_failure(settings, st, retries, name, new_hash)
+            _log_and_notify_failure(settings, "deploy", name, detail, attempts)
 
     if removed:
         if settings.prune_removed_stacks:
@@ -162,12 +208,14 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
                     log.warning("stack '%s' removed from repo, nothing on disk to tear down, dropping from state",
                                 name)
                     known.pop(name, None)
+                    retries.pop(name, None)
                     state_mod.save(settings.state_file, st)
                     continue
                 try:
                     log.warning("stack '%s' removed from repo, tearing down", name)
                     compose.down(compose_file, env_file, name, deploy_path, settings.deploy_timeout_seconds)
                     del known[name]
+                    retries.pop(name, None)
                     state_mod.save(settings.state_file, st)
                     shutil.rmtree(deploy_path, ignore_errors=True)
                 except Exception as exc:

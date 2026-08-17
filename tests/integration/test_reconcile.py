@@ -322,3 +322,107 @@ def test_teardown_failure_notifies_and_keeps_state_for_retry(git_repo, tmp_path)
     st = state_mod.load(settings.state_file)
     # Kept for retry, not silently dropped
     assert "temp" in st["stacks"]
+
+
+# --- retry budget: DEPLOY_MAX_RETRIES / DEPLOY_RETRY_DELAY_SECONDS ---
+
+def _counting_failure(calls: list):
+    def _fail(*a, **k):
+        calls.append(1)
+        raise RuntimeError("boom")
+    return _fail
+
+
+def test_failing_stack_stops_being_attempted_once_retries_are_spent(git_repo, tmp_path):
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=2, deploy_retry_delay_seconds=0)
+
+    calls: list = []
+    with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
+        reconcile(settings)
+        reconcile(settings)
+        reconcile(settings)  # retry budget already spent: must not attempt again
+
+    assert len(calls) == 2
+    st = state_mod.load(settings.state_file)
+    assert "bad" not in st["stacks"]
+    assert st["retries"]["bad"]["attempts"] == 2
+
+
+def test_retry_notification_only_says_giving_up_on_the_final_attempt(git_repo, tmp_path):
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=2, deploy_retry_delay_seconds=0)
+
+    notified: list = []
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("boom")), \
+         patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+        reconcile(settings)
+        reconcile(settings)
+
+    assert "attempt 1/2" in notified[0] and "giving up" not in notified[0]
+    assert "giving up" in notified[1]
+
+
+def test_retry_budget_resets_once_the_stack_content_changes(git_repo, tmp_path):
+    add_stack(git_repo, "bad", compose="services:\n  bad:\n    image: bad:v1\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=1, deploy_retry_delay_seconds=0)
+
+    calls: list = []
+    with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
+        reconcile(settings)  # attempt 1/1: exhausted
+        reconcile(settings)  # skipped, same failing content
+        assert len(calls) == 1
+
+        add_stack(git_repo, "bad", compose="services:\n  bad:\n    image: bad:v2\n")
+        reconcile(settings)  # different hash: gets a fresh attempt
+
+    assert len(calls) == 2
+
+
+def test_retry_delay_blocks_an_immediate_second_attempt(git_repo, tmp_path, monkeypatch):
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=5,
+                              deploy_retry_delay_seconds=100)
+
+    fake_now = [1_000_000.0]
+    monkeypatch.setattr("docker_operator.reconcile.time.time", lambda: fake_now[0])
+
+    calls: list = []
+    with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
+        reconcile(settings)
+        assert len(calls) == 1
+        reconcile(settings)  # too soon: still within the backoff delay
+        assert len(calls) == 1
+        fake_now[0] += 150
+        reconcile(settings)  # delay elapsed: retries again
+        assert len(calls) == 2
+
+
+def test_force_bypasses_an_exhausted_retry_budget(git_repo, tmp_path):
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=1, deploy_retry_delay_seconds=0)
+
+    calls: list = []
+    with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
+        reconcile(settings)                     # attempt 1/1: exhausted
+        reconcile(settings)                     # skipped
+        assert len(calls) == 1
+        reconcile(settings, force={"bad"})      # explicit force overrides the budget
+        assert len(calls) == 2
+
+
+def test_successful_deploy_clears_prior_retry_state(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "flaky", compose="services:\n  flaky:\n    image: flaky:v1\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=5, deploy_retry_delay_seconds=0)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("boom")):
+        reconcile(settings)
+    st = state_mod.load(settings.state_file)
+    assert st["retries"]["flaky"]["attempts"] == 1
+
+    add_stack(git_repo, "flaky", compose="services:\n  flaky:\n    image: flaky:v2\n")
+    reconcile(settings)  # deployed fixture patches resolve_config/up back to succeeding
+
+    st = state_mod.load(settings.state_file)
+    assert "flaky" not in st.get("retries", {})
+    assert "flaky" in st["stacks"]

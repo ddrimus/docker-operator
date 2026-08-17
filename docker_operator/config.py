@@ -71,6 +71,8 @@ class Settings:
     prune_removed_stacks: bool
     poll_interval_seconds: int
     deploy_timeout_seconds: int
+    deploy_max_retries: int
+    deploy_retry_delay_seconds: int
     notify_webhook_url: str | None
     log_level: str
 
@@ -125,6 +127,8 @@ def load_settings() -> Settings:
         prune_removed_stacks=_env_bool("PRUNE_REMOVED_STACKS", False),
         poll_interval_seconds=_env_int("POLL_INTERVAL_SECONDS", 300),
         deploy_timeout_seconds=_env_int("DEPLOY_TIMEOUT_SECONDS", 300),
+        deploy_max_retries=_env_int("DEPLOY_MAX_RETRIES", 3),
+        deploy_retry_delay_seconds=_env_int("DEPLOY_RETRY_DELAY_SECONDS", 60),
         notify_webhook_url=os.environ.get("NOTIFY_WEBHOOK_URL") or None,
         log_level=_env("LOG_LEVEL", "INFO"),
     )
