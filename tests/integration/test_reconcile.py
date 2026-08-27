@@ -145,6 +145,43 @@ def test_network_owner_deployed_before_dependent(git_repo, tmp_path):
     assert calls.index("traefik") < calls.index("forgejo")
 
 
+def test_deploy_priority_deploys_named_stacks_first(git_repo, tmp_path, deployed):
+    # Alphabetically "forgejo" < "nginx" < "traefik"; without priority they'd deploy in that order
+    add_stack(git_repo, "forgejo")
+    add_stack(git_repo, "nginx")
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_priority=("nginx", "forgejo"))
+
+    reconcile(settings)
+
+    order = [project for action, project in deployed]
+    assert order == ["nginx", "forgejo", "traefik"]
+
+
+def test_deploy_priority_never_overrides_a_real_network_dependency(git_repo, tmp_path):
+    # "traefik" owns the network "proxy" that "forgejo" needs externally, even with forgejo prioritized
+    # over traefik, forgejo must still wait until traefik (its real dependency) has deployed
+    add_stack(git_repo, "traefik")
+    add_stack(git_repo, "forgejo")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_priority=("forgejo", "traefik"))
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        if project == "traefik":
+            return json.dumps({"networks": {"proxy": {"name": "proxy"}}})
+        return json.dumps({"networks": {"proxy": {"name": "proxy", "external": True}}})
+
+    calls: list[str] = []
+
+    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout):
+        calls.append(project)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=fake_up):
+        reconcile(settings)
+
+    assert calls.index("traefik") < calls.index("forgejo")
+
+
 def test_removed_stack_left_alone_when_prune_disabled(git_repo, tmp_path, deployed):
     add_stack(git_repo, "temp")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=False)
