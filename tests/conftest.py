@@ -100,6 +100,7 @@ def make_settings(tmp_path: Path, *, git_repo_url: str, sops_age_key_file: Path 
         deploy_timeout_seconds=30,
         deploy_max_retries=3,
         deploy_retry_delay_seconds=0,
+        deploy_priority=(),
         notify_webhook_url=None,
         log_level="INFO",
     )

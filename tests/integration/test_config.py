@@ -112,6 +112,22 @@ def test_deploy_retry_parsed_when_set(monkeypatch):
     assert s.deploy_retry_delay_seconds == 30
 
 
+def test_deploy_priority_defaults_to_empty(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.delenv("DEPLOY_PRIORITY", raising=False)
+    assert load_settings().deploy_priority == ()
+
+
+def test_deploy_priority_parses_comma_separated_names(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_PRIORITY="nginx, forgejo ,traefik")
+    assert load_settings().deploy_priority == ("nginx", "forgejo", "traefik")
+
+
+def test_deploy_priority_ignores_blank_entries(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_PRIORITY="nginx,,  ,forgejo")
+    assert load_settings().deploy_priority == ("nginx", "forgejo")
+
+
 def test_deploy_dir_independent_of_data_dir_when_set(monkeypatch):
     _set_env(monkeypatch, DATA_DIR="/data", DEPLOY_DIR="/deploy")
     s = load_settings()

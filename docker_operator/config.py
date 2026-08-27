@@ -43,6 +43,11 @@ def _env_optional_int(name: str) -> int | None:
         sys.exit(1)
 
 
+def _env_list(name: str) -> tuple[str, ...]:
+    val = os.environ.get(name, "")
+    return tuple(s.strip() for s in val.split(",") if s.strip())
+
+
 # Return the local filesystem path if GIT_REPO_URL is a bind-mounted repo rather than a network URL, so a missing mount fails fast at startup
 def local_repo_path(url: str) -> Path | None:
     if url.startswith("file://"):
@@ -73,6 +78,7 @@ class Settings:
     deploy_timeout_seconds: int
     deploy_max_retries: int
     deploy_retry_delay_seconds: int
+    deploy_priority: tuple[str, ...]
     notify_webhook_url: str | None
     log_level: str
 
@@ -129,6 +135,7 @@ def load_settings() -> Settings:
         deploy_timeout_seconds=_env_int("DEPLOY_TIMEOUT_SECONDS", 300),
         deploy_max_retries=_env_int("DEPLOY_MAX_RETRIES", 3),
         deploy_retry_delay_seconds=_env_int("DEPLOY_RETRY_DELAY_SECONDS", 60),
+        deploy_priority=_env_list("DEPLOY_PRIORITY"),
         notify_webhook_url=os.environ.get("NOTIFY_WEBHOOK_URL") or None,
         log_level=_env("LOG_LEVEL", "INFO"),
     )

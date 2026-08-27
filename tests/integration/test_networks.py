@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from docker_operator.networks import parse_networks, topo_order
+from docker_operator.networks import parse_networks, priority_sorted, topo_order
 
 
 def _cfg(networks: dict) -> str:
@@ -88,3 +88,32 @@ def test_topo_order_cycle_falls_back_to_original_order_without_raising():
 @pytest.mark.parametrize("names", [[], ["solo"]])
 def test_topo_order_trivial_inputs(names):
     assert topo_order(names, {}) == names
+
+
+# --- priority_sorted ---
+
+def test_priority_sorted_moves_priority_names_to_front_in_given_order():
+    assert priority_sorted(["a", "b", "c"], ("c", "a")) == ["c", "a", "b"]
+
+
+def test_priority_sorted_no_priority_keeps_original_order():
+    assert priority_sorted(["c", "a", "b"], ()) == ["c", "a", "b"]
+
+
+def test_priority_sorted_ignores_priority_name_not_present():
+    assert priority_sorted(["a", "b"], ("nginx", "a")) == ["a", "b"]
+
+
+def test_priority_sorted_preserves_relative_order_of_non_priority_names():
+    assert priority_sorted(["a", "b", "c", "d"], ("c",)) == ["c", "a", "b", "d"]
+
+
+def test_priority_sorted_feeds_into_topo_order_without_overriding_real_dependencies():
+    # "b" is priority but depends on "a"; the network dependency still wins over priority
+    order = topo_order(priority_sorted(["a", "b"], ("b",)), {"b": {"a"}})
+    assert order.index("a") < order.index("b")
+
+
+def test_priority_sorted_wins_ties_left_to_topo_order():
+    order = topo_order(priority_sorted(["a", "b", "c"], ("c",)), {})
+    assert order == ["c", "a", "b"]

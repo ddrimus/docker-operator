@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from . import compose, secrets, state as state_mod
 from .config import Settings
 from .gitops import sync_repo
-from .networks import parse_networks, topo_order
+from .networks import parse_networks, priority_sorted, topo_order
 from .notify import notify
 from .stacks import Stack, discover_stacks, stack_hash
 from .util import chown_recursive, exc_detail
@@ -179,7 +179,7 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
         name: {owners[n] for n in ext if n in owners and owners[n] != name}
         for name, ext in needs.items()
     }
-    order = topo_order(list(staged.keys()), depends_on)
+    order = topo_order(priority_sorted(list(staged.keys()), settings.deploy_priority), depends_on)
 
     # Phase C: apply each staged stack and promote it only once `up` succeeds
     for name in order:
