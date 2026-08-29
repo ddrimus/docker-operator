@@ -5,6 +5,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import apprise
+
+# Placeholder value from example.env, refused at startup
+EXAMPLE_WEBHOOK_SECRET = "changeme_generate_with_openssl_rand_hex_32"
+
 
 def _env(name: str, default: str | None = None, required: bool = False) -> str:
     val = os.environ.get(name, default)
@@ -116,8 +121,22 @@ def load_settings() -> Settings:
               f"(no HEAD file) was found there, check the bind mount", file=sys.stderr)
         sys.exit(1)
 
+    webhook_secret = _env("WEBHOOK_SECRET", required=True)
+    # example.env ships this placeholder; running with it would let anyone who has read the README sign webhooks
+    if webhook_secret == EXAMPLE_WEBHOOK_SECRET:
+        print("FATAL: WEBHOOK_SECRET is still the example.env placeholder, set it to a random value "
+              "(e.g. openssl rand -hex 32)", file=sys.stderr)
+        sys.exit(1)
+
+    notify_urls = (os.environ.get("NOTIFY_URLS") or "").strip() or None
+    # Checked once here instead of at the first notification, so a typo fails at startup instead of silently dropping every alert; the URLs themselves aren't printed since they usually embed tokens
+    if notify_urls and not apprise.Apprise().add(notify_urls):
+        print("FATAL: NOTIFY_URLS contains an entry that is not a valid Apprise URL, "
+              "see https://github.com/caronc/apprise/wiki", file=sys.stderr)
+        sys.exit(1)
+
     return Settings(
-        webhook_secret=_env("WEBHOOK_SECRET", required=True),
+        webhook_secret=webhook_secret,
         git_repo_url=git_repo_url,
         git_branch=_env("GIT_BRANCH", "main"),
         data_dir=data_dir,
@@ -136,6 +155,6 @@ def load_settings() -> Settings:
         deploy_max_retries=_env_int("DEPLOY_MAX_RETRIES", 3),
         deploy_retry_delay_seconds=_env_int("DEPLOY_RETRY_DELAY_SECONDS", 60),
         deploy_priority=_env_list("DEPLOY_PRIORITY"),
-        notify_urls=os.environ.get("NOTIFY_URLS") or None,
+        notify_urls=notify_urls,
         log_level=_env("LOG_LEVEL", "INFO"),
     )
