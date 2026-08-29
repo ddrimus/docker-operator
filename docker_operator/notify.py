@@ -6,13 +6,17 @@ import apprise
 
 log = logging.getLogger("docker_operator.notify")
 
+# Services that show a sender name, user agent or link use this instead of Apprise's own defaults
+_ASSET = apprise.AppriseAsset(app_id="Docker Operator", app_desc="Docker Operator",
+                              app_url="https://github.com/ddrimus/docker-operator")
+
 
 # Best-effort notification to every Apprise URL in urls (comma or space separated, e.g. "tgram://token/chat, ntfys://host/topic"); no-op if urls is unset
 def notify(urls: str | None, text: str) -> None:
     if not urls:
         return
     try:
-        apobj = apprise.Apprise()
+        apobj = apprise.Apprise(asset=_ASSET)
         if not apobj.add(urls):
             log.warning("one or more NOTIFY_URLS entries are not valid Apprise URLs and were skipped")
         if not apobj:
