@@ -80,6 +80,9 @@ class Settings:
     deploy_retry_delay_seconds: int
     deploy_priority: tuple[str, ...]
     notify_webhook_url: str | None
+    registry_host: str | None
+    registry_username: str | None
+    registry_password: str | None
     log_level: str
 
     @property
@@ -116,6 +119,14 @@ def load_settings() -> Settings:
               f"(no HEAD file) was found there, check the bind mount", file=sys.stderr)
         sys.exit(1)
 
+    registry_host = os.environ.get("REGISTRY_HOST") or None
+    registry_username = os.environ.get("REGISTRY_USERNAME") or None
+    registry_password = os.environ.get("REGISTRY_PASSWORD") or None
+    if bool(registry_host) != bool(registry_username and registry_password):
+        print("FATAL: REGISTRY_HOST and REGISTRY_USERNAME/REGISTRY_PASSWORD must be set together "
+              "(all three or none)", file=sys.stderr)
+        sys.exit(1)
+
     return Settings(
         webhook_secret=_env("WEBHOOK_SECRET", required=True),
         git_repo_url=git_repo_url,
@@ -137,5 +148,8 @@ def load_settings() -> Settings:
         deploy_retry_delay_seconds=_env_int("DEPLOY_RETRY_DELAY_SECONDS", 60),
         deploy_priority=_env_list("DEPLOY_PRIORITY"),
         notify_webhook_url=os.environ.get("NOTIFY_WEBHOOK_URL") or None,
+        registry_host=registry_host,
+        registry_username=registry_username,
+        registry_password=registry_password,
         log_level=_env("LOG_LEVEL", "INFO"),
     )

@@ -8,6 +8,7 @@ import urllib.request
 
 from .config import load_settings
 from .reconcile import reconcile
+from .registry import login as registry_login
 from .server import run
 from .util import chown_recursive
 
@@ -46,6 +47,8 @@ def main() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         stream=sys.stdout,
     )
+    registry_login(settings)
+
     # mkdir's mode= only applies on creation, so chmod explicitly in case Docker already created these as looser bind-mount points
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings.data_dir.chmod(0o700)

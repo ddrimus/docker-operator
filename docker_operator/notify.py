@@ -17,7 +17,8 @@ def notify(url: str | None, text: str) -> None:
     if len(text) > _DISCORD_CONTENT_LIMIT:
         text = text[:_DISCORD_CONTENT_LIMIT - 1] + "…"
     body = json.dumps({"content": text}).encode()
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json", "User-Agent": "docker-operator-notify/1.0"}
+    req = urllib.request.Request(url, data=body, headers=headers)
     try:
         urllib.request.urlopen(req, timeout=10)
     except Exception as exc:

@@ -102,6 +102,9 @@ def make_settings(tmp_path: Path, *, git_repo_url: str, sops_age_key_file: Path 
         deploy_retry_delay_seconds=0,
         deploy_priority=(),
         notify_webhook_url=None,
+        registry_host=None,
+        registry_username=None,
+        registry_password=None,
         log_level="INFO",
     )
     defaults.update(overrides)
