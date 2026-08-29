@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from docker_operator.config import load_settings, local_repo_path
+from docker_operator.config import EXAMPLE_WEBHOOK_SECRET, load_settings, local_repo_path
 
 REQUIRED = {"WEBHOOK_SECRET": "s", "GIT_REPO_URL": "https://example.com/repo.git"}
 
@@ -207,3 +207,53 @@ def test_network_git_repo_url_skips_local_validation_entirely(monkeypatch):
     # Must not try to stat a URL as a filesystem path.
     _set_env(monkeypatch, GIT_REPO_URL="https://forgejo.example.com/user/repo.git")
     assert load_settings().git_repo_url == "https://forgejo.example.com/user/repo.git"
+
+
+# --- WEBHOOK_SECRET placeholder ---
+
+def test_example_env_placeholder_secret_exits_fatal(monkeypatch, capsys):
+    _set_env(monkeypatch, WEBHOOK_SECRET=EXAMPLE_WEBHOOK_SECRET)
+    with pytest.raises(SystemExit):
+        load_settings()
+    assert "placeholder" in capsys.readouterr().err
+
+
+def test_placeholder_constant_matches_example_env():
+    # The check above is only useful as long as it refuses the exact value example.env really ships
+    example = (Path(__file__).resolve().parents[2] / "example.env").read_text()
+    assert f"WEBHOOK_SECRET={EXAMPLE_WEBHOOK_SECRET}" in example.splitlines()
+
+
+# --- NOTIFY_URLS validation ---
+
+def test_notify_urls_unset_disables_notifications(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.delenv("NOTIFY_URLS", raising=False)
+    assert load_settings().notify_urls is None
+
+
+def test_notify_urls_blank_disables_notifications(monkeypatch):
+    _set_env(monkeypatch, NOTIFY_URLS="   ")
+    assert load_settings().notify_urls is None
+
+
+def test_notify_urls_accepts_several_apprise_urls(monkeypatch):
+    urls = "json://notify.example.com/hook, ntfys://ntfy.example.com/deploys"
+    _set_env(monkeypatch, NOTIFY_URLS=f"  {urls}  ")
+    assert load_settings().notify_urls == urls
+
+
+@pytest.mark.parametrize("urls", [
+    "definitely not a url",
+    # A valid URL next to a broken one still fails: an unknown scheme, or a known one missing its token
+    "json://notify.example.com/hook, nosuchservice://example.com",
+    "json://notify.example.com/hook, tgram://",
+])
+def test_notify_urls_with_an_invalid_entry_exits_fatal_without_printing_it(monkeypatch, capsys, urls):
+    _set_env(monkeypatch, NOTIFY_URLS=urls)
+    with pytest.raises(SystemExit):
+        load_settings()
+    err = capsys.readouterr().err
+    assert "NOTIFY_URLS" in err
+    # URLs usually embed tokens, so the FATAL line never echoes them back
+    assert "notify.example.com" not in err
