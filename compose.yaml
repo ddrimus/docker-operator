@@ -29,9 +29,9 @@ services:
       NOTIFY_WEBHOOK_URL: "${NOTIFY_WEBHOOK_URL}"
       LOG_LEVEL: "${LOG_LEVEL}"
     volumes:
-      - "./data/data:/data"
-      - "./data/deploy:/deploy"
-      - "./data/secrets/sops_age.key:/run/secrets/sops_age.key:ro"
+      - "./data/config/sops_age.key:/run/secrets/sops_age.key:ro"
+      - "./data/data/data:/data"
+      - "./data/data/deploy:/deploy"
       - "/path/to/forgejo/data/git/repositories/owner/repo.git:/repository/stacks:ro"
       - "/var/run/docker.sock:/var/run/docker.sock"
     restart: unless-stopped
