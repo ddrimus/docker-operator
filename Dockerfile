@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools msgpack \
     && pip install --no-cache-dir . \
     && rm -rf /app/pyproject.toml /root/.cache
 
-ENV DATA_DIR=/data DEPLOY_DIR=/deploy LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080 TZ=UTC
+ENV DATA_DIR=/data DEPLOY_DIR=/deploy LOG_DIR=/logs LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080 TZ=UTC
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["python", "-m", "docker_operator", "--healthcheck"]
