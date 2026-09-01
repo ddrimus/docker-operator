@@ -86,6 +86,7 @@ class Settings:
     deploy_priority: tuple[str, ...]
     notify_urls: str | None
     log_level: str
+    log_dir: Path
 
     @property
     def repo_dir(self) -> Path:
@@ -157,4 +158,5 @@ def load_settings() -> Settings:
         deploy_priority=_env_list("DEPLOY_PRIORITY"),
         notify_urls=notify_urls,
         log_level=_env("LOG_LEVEL", "INFO"),
+        log_dir=Path(_env("LOG_DIR", "/logs")),
     )

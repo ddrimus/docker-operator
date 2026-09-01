@@ -58,7 +58,7 @@ def test_missing_git_repo_url_exits_fatal(monkeypatch):
 
 def test_defaults_when_optional_vars_unset(monkeypatch):
     _set_env(monkeypatch)
-    for name in ("GIT_BRANCH", "DATA_DIR", "DEPLOY_DIR", "COMPOSE_SUBDIR", "LISTEN_PORT",
+    for name in ("GIT_BRANCH", "DATA_DIR", "DEPLOY_DIR", "LOG_DIR", "COMPOSE_SUBDIR", "LISTEN_PORT",
                  "PULL_IMAGES", "PRUNE_REMOVED_STACKS", "POLL_INTERVAL_SECONDS", "LOG_LEVEL"):
         monkeypatch.delenv(name, raising=False)
     s = load_settings()
@@ -66,6 +66,7 @@ def test_defaults_when_optional_vars_unset(monkeypatch):
     assert s.data_dir == Path("/data")
     # Falls back to data_dir/deploy when unset
     assert s.deploy_dir == Path("/data/deploy")
+    assert s.log_dir == Path("/logs")
     assert s.compose_subdir == "compose"
     assert s.listen_port == 8080
     assert s.pull_images is True
