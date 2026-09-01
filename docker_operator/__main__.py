@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import urllib.request
+from logging.handlers import RotatingFileHandler
 
 from .config import load_settings
 from .reconcile import reconcile
@@ -42,18 +43,23 @@ def main() -> None:
         parser.error("--force requires --once (it forces a single manual reconcile pass)")
 
     settings = load_settings()
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        stream=sys.stdout,
-    )
-    registry_login(settings)
-
     # mkdir's mode= only applies on creation, so chmod explicitly in case Docker already created these as looser bind-mount points
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings.data_dir.chmod(0o700)
     settings.deploy_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings.deploy_dir.chmod(0o700)
+    settings.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    settings.log_dir.chmod(0o700)
+
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        # 10MB x 5 backups on top of stdout; `docker compose logs -f` keeps working either way
+        handlers=[logging.StreamHandler(sys.stdout),
+                  RotatingFileHandler(settings.log_dir / "docker-operator.log",
+                                       maxBytes=10 * 1024 * 1024, backupCount=5)],
+    )
+    registry_login(settings)
     # DEPLOY_UID/DEPLOY_GID let a host user own DEPLOY_DIR outright (not just its contents) so it's
     # `cd`-able and `docker compose`-able as themselves; unset (the default) leaves it root-owned
     chown_recursive(settings.deploy_dir, settings.deploy_uid, settings.deploy_gid)

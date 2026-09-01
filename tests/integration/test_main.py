@@ -35,6 +35,7 @@ def test_once_without_force_calls_reconcile_with_no_force(monkeypatch, tmp_path)
     monkeypatch.setenv("GIT_REPO_URL", "https://example.com/x.git")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("DEPLOY_DIR", str(tmp_path / "deploy"))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
 
     with patch("docker_operator.__main__.reconcile") as mock_reconcile:
         main()
@@ -50,6 +51,7 @@ def test_once_with_force_passes_the_stack_set_through(monkeypatch, tmp_path):
     monkeypatch.setenv("GIT_REPO_URL", "https://example.com/x.git")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("DEPLOY_DIR", str(tmp_path / "deploy"))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
 
     with patch("docker_operator.__main__.reconcile") as mock_reconcile:
         main()
@@ -65,6 +67,7 @@ def test_default_mode_starts_the_server(monkeypatch, tmp_path):
     monkeypatch.setenv("GIT_REPO_URL", "https://example.com/x.git")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("DEPLOY_DIR", str(tmp_path / "deploy"))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
 
     with patch("docker_operator.__main__.run") as mock_run:
         main()
@@ -72,20 +75,24 @@ def test_default_mode_starts_the_server(monkeypatch, tmp_path):
     mock_run.assert_called_once()
 
 
-def test_data_and_deploy_dirs_created_with_0700(monkeypatch, tmp_path):
+def test_data_deploy_and_log_dirs_created_with_0700(monkeypatch, tmp_path):
     _argv(monkeypatch, "--once")
     data_dir = tmp_path / "fresh-data"
     deploy_dir = tmp_path / "fresh-deploy"
+    log_dir = tmp_path / "fresh-logs"
     monkeypatch.setenv("WEBHOOK_SECRET", "s")
     monkeypatch.setenv("GIT_REPO_URL", "https://example.com/x.git")
     monkeypatch.setenv("DATA_DIR", str(data_dir))
     monkeypatch.setenv("DEPLOY_DIR", str(deploy_dir))
+    monkeypatch.setenv("LOG_DIR", str(log_dir))
 
     with patch("docker_operator.__main__.reconcile"):
         main()
 
     assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(deploy_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+    assert (log_dir / "docker-operator.log").is_file()
 
 
 def test_preexisting_loose_permissions_get_tightened(monkeypatch, tmp_path):
@@ -94,18 +101,22 @@ def test_preexisting_loose_permissions_get_tightened(monkeypatch, tmp_path):
     data_dir.mkdir(mode=0o755)
     deploy_dir = tmp_path / "deploy"
     deploy_dir.mkdir(mode=0o755)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(mode=0o755)
 
     _argv(monkeypatch, "--once")
     monkeypatch.setenv("WEBHOOK_SECRET", "s")
     monkeypatch.setenv("GIT_REPO_URL", "https://example.com/x.git")
     monkeypatch.setenv("DATA_DIR", str(data_dir))
     monkeypatch.setenv("DEPLOY_DIR", str(deploy_dir))
+    monkeypatch.setenv("LOG_DIR", str(log_dir))
 
     with patch("docker_operator.__main__.reconcile"):
         main()
 
     assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(deploy_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
 
 
 # --- --healthcheck ---

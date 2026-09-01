@@ -15,7 +15,7 @@ def test_signal_triggers_clean_exit_with_log_message(git_repo: Path, tmp_path: P
     env = os.environ.copy()
     env.update(
         WEBHOOK_SECRET="x", GIT_REPO_URL=str(git_repo), GIT_BRANCH="main",
-        DATA_DIR=str(tmp_path / "data"), DEPLOY_DIR=str(tmp_path / "deploy"),
+        DATA_DIR=str(tmp_path / "data"), DEPLOY_DIR=str(tmp_path / "deploy"), LOG_DIR=str(tmp_path / "logs"),
         LISTEN_PORT="0", POLL_INTERVAL_SECONDS="0",
     )
     repo_root = Path(__file__).resolve().parent.parent.parent

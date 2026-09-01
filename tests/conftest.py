@@ -106,6 +106,7 @@ def make_settings(tmp_path: Path, *, git_repo_url: str, sops_age_key_file: Path 
         registry_username=None,
         registry_password=None,
         log_level="INFO",
+        log_dir=tmp_path / "logs",
     )
     defaults.update(overrides)
     return Settings(**defaults)

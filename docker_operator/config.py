@@ -84,6 +84,7 @@ class Settings:
     registry_username: str | None
     registry_password: str | None
     log_level: str
+    log_dir: Path
 
     @property
     def repo_dir(self) -> Path:
@@ -152,4 +153,5 @@ def load_settings() -> Settings:
         registry_username=registry_username,
         registry_password=registry_password,
         log_level=_env("LOG_LEVEL", "INFO"),
+        log_dir=Path(_env("LOG_DIR", "/logs")),
     )
