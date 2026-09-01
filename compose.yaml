@@ -32,6 +32,7 @@ services:
       - "./data/config/sops_age.key:/run/secrets/sops_age.key:ro"
       - "./data/data/data:/data"
       - "./data/data/deploy:/deploy"
+      - "./data/data/logs:/logs"
       - "/path/to/forgejo/data/git/repositories/owner/repo.git:/repository/stacks:ro"
       - "/var/run/docker.sock:/var/run/docker.sock"
     restart: unless-stopped
