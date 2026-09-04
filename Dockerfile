@@ -1,4 +1,4 @@
-# ---- builder: only this stage needs curl, it never reaches the final image ----
+# Builder stage: only this stage needs curl, it never reaches the final image
 FROM python:3.14.7-alpine3.24 AS builder
 
 # sha256 checksums pinned from upstream's own sops-v3.13.3.checksums.txt, verified out-of-band since this binary handles every stack's secrets
@@ -14,13 +14,12 @@ RUN apk add --no-cache curl ca-certificates \
     && echo "${SHA256}  /usr/local/bin/sops" | sha256sum -c - \
     && chmod +x /usr/local/bin/sops
 
-# ---- final: only what's needed to run, no curl, no build tooling ----
+# Final stage: only what's needed to run, no curl, no build tooling
 FROM python:3.14.7-alpine3.24
 
 # Runs as root deliberately: docker.sock access is already root-equivalent regardless of UID, so a non-root user adds no real isolation here
 # apk upgrade pulls in security backports already published for this alpine branch (e.g. libuuid/util-linux) that predate this base image build
-# bind-mounted repos under /repository are owned by the host, which git's dubious-ownership check
-# otherwise rejects; trust that whole prefix so any mounted repo folder works without extra config
+# bind-mounted repos under /repository are host-owned, which trips git's dubious-ownership check unless that whole prefix is trusted
 RUN apk upgrade --no-cache \
     && apk add --no-cache git docker-cli docker-cli-compose ca-certificates tzdata \
     && git config --system --add safe.directory '/repository/*'
