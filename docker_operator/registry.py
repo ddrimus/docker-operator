@@ -8,10 +8,7 @@ from .config import Settings
 log = logging.getLogger("docker_operator.registry")
 
 
-# Best-effort `docker login`; no-op if REGISTRY_HOST is unset. Password goes over stdin, never as an
-# argv/env value a process listing could catch, and is never logged. Failure isn't fatal: stacks
-# pulling public images are unaffected, and a private-image pull failure is already reported via
-# reconcile's own retry/notify path
+# Best-effort `docker login`; no-op if REGISTRY_HOST unset, password only via stdin (never logged), failure isn't fatal since pull failures are already reported via reconcile's retry path
 def login(settings: Settings) -> None:
     if not settings.registry_host:
         return

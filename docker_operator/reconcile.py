@@ -18,8 +18,7 @@ from .util import chown_recursive, exc_detail
 log = logging.getLogger("docker_operator.reconcile")
 
 
-# True if this attempt at new_hash should run now: never attempted before, still within the retry budget
-# and past the backoff delay, or a different hash than whatever was last failing (a real change resets it)
+# True if this attempt at new_hash should run now: never attempted, past the backoff delay, or a different hash than what was last failing (a real change resets it)
 def _should_attempt(retries: dict, name: str, new_hash: str, max_retries: int, retry_delay_seconds: int) -> bool:
     retry = retries.get(name)
     if retry is None or retry["hash"] != new_hash:
@@ -29,8 +28,7 @@ def _should_attempt(retries: dict, name: str, new_hash: str, max_retries: int, r
     return (time.time() - retry["last_attempt"]) >= retry_delay_seconds
 
 
-# Record a failed attempt at new_hash, persisting immediately so attempts survive across reconcile passes;
-# kept separate from known/st["stacks"] so "no entry" there keeps meaning "never successfully deployed"
+# Record a failed attempt at new_hash, persisted immediately, kept separate from known/st["stacks"] so "no entry" there keeps meaning "never successfully deployed"
 def _record_failure(settings: Settings, st: dict, retries: dict, name: str, new_hash: str) -> int:
     retry = retries.get(name)
     attempts = retry["attempts"] + 1 if retry and retry["hash"] == new_hash else 1

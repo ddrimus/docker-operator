@@ -27,9 +27,7 @@ def parse_networks(config_json: str) -> tuple[set[str], set[str]]:
     return owned, external
 
 
-# Move priority names to the front (in the given order), keeping everyone else in their existing relative
-# order; feed the result into topo_order() so its ready-set tie-break (which follows list position) prefers
-# them without ever overriding a real network dependency: a priority stack still waits if it isn't ready
+# Move priority names to the front, keeping relative order otherwise, so topo_order's tie-break prefers them without ever overriding a real dependency
 def priority_sorted(names: list[str], priority: tuple[str, ...]) -> list[str]:
     rank = {name: i for i, name in enumerate(priority)}
     return sorted(names, key=lambda n: (rank.get(n, len(priority)), names.index(n)))

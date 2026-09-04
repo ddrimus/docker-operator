@@ -60,8 +60,7 @@ def main() -> None:
                                        maxBytes=10 * 1024 * 1024, backupCount=5)],
     )
     registry_login(settings)
-    # DEPLOY_UID/DEPLOY_GID let a host user own DEPLOY_DIR outright (not just its contents) so it's
-    # `cd`-able and `docker compose`-able as themselves; unset (the default) leaves it root-owned
+    # DEPLOY_UID/DEPLOY_GID let a host user own DEPLOY_DIR outright, so it's `cd`/`docker compose`-able as themselves; unset leaves it root-owned
     chown_recursive(settings.deploy_dir, settings.deploy_uid, settings.deploy_gid)
 
     if args.once:
