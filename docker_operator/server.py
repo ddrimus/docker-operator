@@ -126,7 +126,7 @@ def make_handler(settings: Settings):
     return Handler
 
 
-# No connection-count bound: this port is only reachable from other containers on the "forgejo" bridge network, never published
+# No connection-count bound: the 15s socket timeout and 5 MB body cap keep every connection cheap, and only signed pushes ever trigger work; meant to be reachable from your git server on the LAN, hosted ones that can't reach it can rely on polling instead
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
