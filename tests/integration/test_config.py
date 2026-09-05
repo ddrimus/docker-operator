@@ -187,7 +187,7 @@ def test_local_git_repo_url_must_exist(monkeypatch, tmp_path):
 
 
 def test_local_git_repo_url_ok_with_bare_repo_head(monkeypatch, tmp_path):
-    # A bare repo has HEAD directly at its root.
+    # A bare repo has HEAD directly at its root
     repo = tmp_path / "bare.git"
     repo.mkdir()
     (repo / "HEAD").write_text("ref: refs/heads/main\n")
@@ -196,7 +196,7 @@ def test_local_git_repo_url_ok_with_bare_repo_head(monkeypatch, tmp_path):
 
 
 def test_local_git_repo_url_ok_with_dot_git_subdir(monkeypatch, tmp_path):
-    # A normal (non-bare) checkout has HEAD under .git/.
+    # A normal (non-bare) checkout has HEAD under .git/
     repo = tmp_path / "checkout"
     (repo / ".git").mkdir(parents=True)
     (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
@@ -205,6 +205,6 @@ def test_local_git_repo_url_ok_with_dot_git_subdir(monkeypatch, tmp_path):
 
 
 def test_network_git_repo_url_skips_local_validation_entirely(monkeypatch):
-    # Must not try to stat a URL as a filesystem path.
+    # Must not try to stat a URL as a filesystem path
     _set_env(monkeypatch, GIT_REPO_URL="https://forgejo.example.com/user/repo.git")
     assert load_settings().git_repo_url == "https://forgejo.example.com/user/repo.git"

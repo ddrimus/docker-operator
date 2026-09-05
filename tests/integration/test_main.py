@@ -156,7 +156,7 @@ def test_healthcheck_does_not_require_full_settings(monkeypatch):
 
 
 def test_healthcheck_flag_short_circuits_before_settings_validation(monkeypatch):
-    # --healthcheck must not blow up even with a totally invalid config.
+    # --healthcheck must not blow up even with a totally invalid config
     _argv(monkeypatch, "--healthcheck")
     monkeypatch.delenv("WEBHOOK_SECRET", raising=False)
     monkeypatch.delenv("GIT_REPO_URL", raising=False)
