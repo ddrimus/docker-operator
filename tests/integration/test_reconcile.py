@@ -81,11 +81,11 @@ def test_canonical_files_only_promoted_after_successful_up(git_repo, tmp_path):
          patch("docker_operator.compose.up", side_effect=RuntimeError("boom")):
         reconcile(settings)
 
-    # Nothing promoted, nothing recorded: next reconcile retries cleanly.
+    # Nothing promoted, nothing recorded: next reconcile retries cleanly
     assert not (settings.deploy_dir / "traefik" / "compose.yaml").exists()
     st = state_mod.load(settings.state_file)
     assert "traefik" not in st["stacks"]
-    # Staged files are cleaned up too, not left as litter.
+    # Staged files are cleaned up too, not left as litter
     assert not (settings.deploy_dir / "traefik" / "compose.yaml.new").exists()
 
 
@@ -159,8 +159,7 @@ def test_deploy_priority_deploys_named_stacks_first(git_repo, tmp_path, deployed
 
 
 def test_deploy_priority_never_overrides_a_real_network_dependency(git_repo, tmp_path):
-    # "traefik" owns the network "proxy" that "forgejo" needs externally, even with forgejo prioritized
-    # over traefik, forgejo must still wait until traefik (its real dependency) has deployed
+    # "traefik" owns network "proxy" which "forgejo" needs externally: forgejo must still wait for traefik despite being prioritized over it
     add_stack(git_repo, "traefik")
     add_stack(git_repo, "forgejo")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_priority=("forgejo", "traefik"))
@@ -378,7 +377,8 @@ def test_failing_stack_stops_being_attempted_once_retries_are_spent(git_repo, tm
     with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
         reconcile(settings)
         reconcile(settings)
-        reconcile(settings)  # retry budget already spent: must not attempt again
+        # Retry budget already spent: must not attempt again
+        reconcile(settings)
 
     assert len(calls) == 2
     st = state_mod.load(settings.state_file)
@@ -406,12 +406,15 @@ def test_retry_budget_resets_once_the_stack_content_changes(git_repo, tmp_path):
 
     calls: list = []
     with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
-        reconcile(settings)  # attempt 1/1: exhausted
-        reconcile(settings)  # skipped, same failing content
+        # Attempt 1/1, exhausted
+        reconcile(settings)
+        # Skipped, same failing content
+        reconcile(settings)
         assert len(calls) == 1
 
         add_stack(git_repo, "bad", compose="services:\n  bad:\n    image: bad:v2\n")
-        reconcile(settings)  # different hash: gets a fresh attempt
+        # Different hash: gets a fresh attempt
+        reconcile(settings)
 
     assert len(calls) == 2
 
@@ -428,10 +431,12 @@ def test_retry_delay_blocks_an_immediate_second_attempt(git_repo, tmp_path, monk
     with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
         reconcile(settings)
         assert len(calls) == 1
-        reconcile(settings)  # too soon: still within the backoff delay
+        # Too soon: still within the backoff delay
+        reconcile(settings)
         assert len(calls) == 1
         fake_now[0] += 150
-        reconcile(settings)  # delay elapsed: retries again
+        # Delay elapsed: retries again
+        reconcile(settings)
         assert len(calls) == 2
 
 
@@ -441,10 +446,13 @@ def test_force_bypasses_an_exhausted_retry_budget(git_repo, tmp_path):
 
     calls: list = []
     with patch("docker_operator.compose.resolve_config", side_effect=_counting_failure(calls)):
-        reconcile(settings)                     # attempt 1/1: exhausted
-        reconcile(settings)                     # skipped
+        # Attempt 1/1, exhausted
+        reconcile(settings)
+        # Skipped
+        reconcile(settings)
         assert len(calls) == 1
-        reconcile(settings, force={"bad"})      # explicit force overrides the budget
+        # Explicit force overrides the budget
+        reconcile(settings, force={"bad"})
         assert len(calls) == 2
 
 
@@ -458,7 +466,8 @@ def test_successful_deploy_clears_prior_retry_state(git_repo, tmp_path, deployed
     assert st["retries"]["flaky"]["attempts"] == 1
 
     add_stack(git_repo, "flaky", compose="services:\n  flaky:\n    image: flaky:v2\n")
-    reconcile(settings)  # deployed fixture patches resolve_config/up back to succeeding
+    # deployed fixture patches resolve_config/up back to succeeding
+    reconcile(settings)
 
     st = state_mod.load(settings.state_file)
     assert "flaky" not in st.get("retries", {})
