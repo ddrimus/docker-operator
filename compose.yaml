@@ -1,7 +1,7 @@
 services:
   docker-operator:
     build:
-      context: ./src
+      context: .
       dockerfile: Dockerfile
     container_name: docker-operator
     networks:
