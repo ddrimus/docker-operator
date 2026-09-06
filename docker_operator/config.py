@@ -112,6 +112,21 @@ def load_settings() -> Settings:
         if not sops_key.is_file():
             print(f"FATAL: SOPS_AGE_KEY_FILE {sops_key} does not exist", file=sys.stderr)
             sys.exit(1)
+        if sops_key.stat().st_mode & 0o077:
+            print(f"WARNING: SOPS_AGE_KEY_FILE {sops_key} is readable by group/other, tighten its permissions on the host", file=sys.stderr)
+
+    listen_port = _env_int("LISTEN_PORT", 8080)
+    if not 0 <= listen_port <= 65535:
+        print(f"FATAL: LISTEN_PORT must be between 0 and 65535, got {listen_port}", file=sys.stderr)
+        sys.exit(1)
+
+    deploy_uid = _env_optional_int("DEPLOY_UID")
+    deploy_gid = _env_optional_int("DEPLOY_GID")
+    for name, val in (("DEPLOY_UID", deploy_uid), ("DEPLOY_GID", deploy_gid)):
+        # 4294967294 is the real uid_t/gid_t ceiling: one past that is the kernel's "leave unchanged" sentinel, not a real id
+        if val is not None and not 0 <= val <= 4294967294:
+            print(f"FATAL: {name} must be a valid id between 0 and 4294967294, got {val}", file=sys.stderr)
+            sys.exit(1)
 
     git_repo_url = _env("GIT_REPO_URL", required=True)
     local_repo = local_repo_path(git_repo_url)
@@ -134,12 +149,12 @@ def load_settings() -> Settings:
         git_branch=_env("GIT_BRANCH", "main"),
         data_dir=data_dir,
         deploy_dir=deploy_dir,
-        deploy_uid=_env_optional_int("DEPLOY_UID"),
-        deploy_gid=_env_optional_int("DEPLOY_GID"),
+        deploy_uid=deploy_uid,
+        deploy_gid=deploy_gid,
         compose_subdir=_env("COMPOSE_SUBDIR", "compose"),
         sops_age_key_file=sops_key,
         listen_host=_env("LISTEN_HOST", "0.0.0.0"),
-        listen_port=_env_int("LISTEN_PORT", 8080),
+        listen_port=listen_port,
         webhook_path=_env("WEBHOOK_PATH", "/webhook"),
         pull_images=_env_bool("PULL_IMAGES", True),
         prune_removed_stacks=_env_bool("PRUNE_REMOVED_STACKS", False),

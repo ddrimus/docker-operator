@@ -20,6 +20,9 @@ def login(settings: Settings) -> None:
     except subprocess.TimeoutExpired:
         log.error("docker login to %s timed out", settings.registry_host)
         return
+    except OSError as exc:
+        log.error("docker login to %s could not run: %s", settings.registry_host, exc)
+        return
     if proc.returncode != 0:
         log.error("docker login to %s failed: %s", settings.registry_host, proc.stderr.strip())
         return

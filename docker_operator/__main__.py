@@ -1,4 +1,4 @@
-# CLI entry point: runs a single reconcile pass or starts the webhook server
+# CLI entry point: runs a single reconcile pass, validates stacks, or starts the webhook server
 from __future__ import annotations
 import argparse
 import logging
@@ -8,7 +8,7 @@ import urllib.request
 from logging.handlers import RotatingFileHandler
 
 from .config import load_settings
-from .reconcile import reconcile
+from .reconcile import reconcile, validate
 from .registry import login as registry_login
 from .server import run
 from .util import chown_recursive
@@ -31,6 +31,8 @@ def main() -> None:
                          help="redeploy STACK even if unchanged, e.g. after a manual "
                               "`docker compose down -v --rmi all` (repeatable; pass 'all' "
                               "to force every stack). Requires --once.")
+    parser.add_argument("--validate", action="store_true",
+                         help="validate every stack's compose config and exit, without deploying (for CI use)")
     parser.add_argument("--healthcheck", action="store_true",
                          help="internal: used by the container HEALTHCHECK")
     args = parser.parse_args()
@@ -59,6 +61,10 @@ def main() -> None:
                   RotatingFileHandler(settings.log_dir / "docker-operator.log",
                                        maxBytes=10 * 1024 * 1024, backupCount=5)],
     )
+
+    if args.validate:
+        sys.exit(0 if validate(settings) else 1)
+
     registry_login(settings)
     # DEPLOY_UID/DEPLOY_GID let a host user own DEPLOY_DIR outright, so it's `cd`/`docker compose`-able as themselves; unset leaves it root-owned
     chown_recursive(settings.deploy_dir, settings.deploy_uid, settings.deploy_gid)

@@ -1,11 +1,13 @@
-# Syncs the repo and brings deployed stacks in line with what's tracked in the compose root
+# Syncs the repo and brings deployed stacks in line with what's tracked in the compose root, or just validates it
 from __future__ import annotations
 import fcntl
 import logging
 import os
 import shutil
+import tempfile
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from . import compose, secrets, state as state_mod
 from .config import Settings
@@ -35,6 +37,20 @@ def _record_failure(settings: Settings, st: dict, retries: dict, name: str, new_
     retries[name] = {"hash": new_hash, "attempts": attempts, "last_attempt": time.time()}
     state_mod.save(settings.state_file, st)
     return attempts
+
+
+# Record a stack as successfully deployed at new_hash, clearing any retry history, and persist immediately
+def _remember_stack(settings: Settings, st: dict, known: dict, retries: dict, name: str, new_hash: str) -> None:
+    known[name] = {"hash": new_hash}
+    retries.pop(name, None)
+    state_mod.save(settings.state_file, st)
+
+
+# Drop a stack from tracked/retry state entirely (nothing left to reconcile against), and persist immediately
+def _forget_stack(settings: Settings, st: dict, known: dict, retries: dict, name: str) -> None:
+    known.pop(name, None)
+    retries.pop(name, None)
+    state_mod.save(settings.state_file, st)
 
 
 # Log and notify a validate/deploy failure, wording it as final once the retry budget for this hash is spent
@@ -129,18 +145,24 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
     st = state_mod.load(settings.state_file)
     known: dict = st.setdefault("stacks", {})
     retries: dict = st.setdefault("retries", {})
+    force_all = bool(force) and "all" in force
     if force:
-        force_all = "all" in force
-        for name in list(known) + list(retries):
-            if force_all or name in force:
-                known.pop(name, None)
-                retries.pop(name, None)
+        cleared = [name for name in list(known) + list(retries) if force_all or name in force]
+        for name in cleared:
+            known.pop(name, None)
+            retries.pop(name, None)
+        if cleared:
+            # Persisted now: a force on a stack with no other changes this pass would otherwise never reach disk
+            state_mod.save(settings.state_file, st)
         log.warning("forced redeploy of all stacks (state cleared)" if force_all
                     else f"forced redeploy of: {', '.join(sorted(force))}")
     current = discover_stacks(settings.compose_root)
 
+    # A stack forced by name still deploys even while paused: an explicit --force is a stronger signal than a possibly-stale marker
+    paused = {name for name, stk in current.items()
+              if stk.paused and not (force_all or (force and name in force))}
     candidates = [(stk, h) for name, stk in current.items()
-                  if (h := stack_hash(stk)) != known.get(name, {}).get("hash")]
+                  if name not in paused and (h := stack_hash(stk)) != known.get(name, {}).get("hash")]
     changed = [(stk, h) for stk, h in candidates
                if _should_attempt(retries, stk.name, h, settings.deploy_max_retries,
                                    settings.deploy_retry_delay_seconds)]
@@ -149,10 +171,12 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
 
     if not changed and not removed:
         suffix = f", {deferred} deferred by retry backoff/limit" if deferred else ""
+        suffix += f", {len(paused)} paused" if paused else ""
         log.info("reconcile: no changes (%d stacks up to date%s)", len(current), suffix)
         return
-    log.info("reconcile: %d changed, %d removed%s", len(changed), len(removed),
-              f", {deferred} deferred" if deferred else "")
+    log.info("reconcile: %d changed, %d removed%s%s", len(changed), len(removed),
+              f", {deferred} deferred" if deferred else "",
+              f", {len(paused)} paused" if paused else "")
 
     # Phase A: stage + validate every changed stack, discover network roles
     staged: dict[str, tuple] = {}
@@ -172,9 +196,9 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
         needs[stk.name] = external
         staged[stk.name] = (stk, staged_compose, staged_env, new_hash)
 
-    # Phase B: order deploys so a stack that owns a network goes before any other changed stack that depends on it as external
+    # Phase B: order deploys so a stack that owns a network, or explicitly lists another via .depends_on, goes after it
     depends_on = {
-        name: {owners[n] for n in ext if n in owners and owners[n] != name}
+        name: {owners[n] for n in ext if n in owners and owners[n] != name} | staged[name][0].depends_on
         for name, ext in needs.items()
     }
     order = topo_order(priority_sorted(list(staged.keys()), settings.deploy_priority), depends_on)
@@ -183,13 +207,14 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
     for name in order:
         stk, staged_compose, staged_env, new_hash = staged[name]
         deploy_path = _deploy_path(settings, name)
+        was_failing = name in retries
         try:
             log.info("deploying stack '%s'", name)
             _promote_and_up(settings, name, deploy_path, staged_compose, staged_env)
-            known[name] = {"hash": new_hash}
-            retries.pop(name, None)
-            state_mod.save(settings.state_file, st)
+            _remember_stack(settings, st, known, retries, name, new_hash)
             log.info("stack '%s' deployed OK -> %s", name, deploy_path)
+            if was_failing:
+                notify(settings.notify_webhook_url, f"docker-operator: `{name}` recovered and deployed OK")
         except Exception as exc:
             detail = exc_detail(exc)
             attempts = _record_failure(settings, st, retries, name, new_hash)
@@ -205,16 +230,12 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
                     # Nothing on disk to tear down; stop tracking it so this doesn't get re-logged on every future reconcile
                     log.warning("stack '%s' removed from repo, nothing on disk to tear down, dropping from state",
                                 name)
-                    known.pop(name, None)
-                    retries.pop(name, None)
-                    state_mod.save(settings.state_file, st)
+                    _forget_stack(settings, st, known, retries, name)
                     continue
                 try:
                     log.warning("stack '%s' removed from repo, tearing down", name)
                     compose.down(compose_file, env_file, name, deploy_path, settings.deploy_timeout_seconds)
-                    del known[name]
-                    retries.pop(name, None)
-                    state_mod.save(settings.state_file, st)
+                    _forget_stack(settings, st, known, retries, name)
                     shutil.rmtree(deploy_path, ignore_errors=True)
                 except Exception as exc:
                     detail = exc_detail(exc)
@@ -222,3 +243,40 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
                     notify(settings.notify_webhook_url, f"docker-operator: failed to tear down `{name}`: {detail}")
         else:
             log.warning("stack(s) removed from repo, PRUNE_REMOVED_STACKS=false, left on disk: %s", removed)
+
+
+# Render and validate one stack's compose config in an isolated scratch dir, touching nothing persistent
+def _validate_stack(settings: Settings, stk: Stack) -> str | None:
+    scratch = Path(tempfile.mkdtemp(prefix=f".validate-{stk.name}-"))
+    try:
+        env_file = scratch / ".env"
+        secrets.render_env_file(stk, settings.sops_age_key_file, env_file)
+        compose.resolve_config(stk.compose_file, env_file, stk.name, scratch, settings.deploy_timeout_seconds)
+        return None
+    except Exception as exc:
+        return exc_detail(exc)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+# Sync the repo and validate every discovered stack's compose config without deploying anything, for CI use ahead of a real reconcile
+def validate(settings: Settings) -> bool:
+    with _reconcile_lock(settings):
+        try:
+            head, synced = sync_repo(settings.git_repo_url, settings.git_branch, settings.repo_dir)
+        except Exception as exc:
+            log.error("cannot reach %s and no previous checkout exists yet: %s", settings.git_repo_url, exc_detail(exc))
+            return False
+        if not synced:
+            log.info("forgejo unreachable, validating against last known-good checkout (%s)", head[:12])
+
+        current = discover_stacks(settings.compose_root)
+        ok = True
+        for name, stk in sorted(current.items()):
+            detail = _validate_stack(settings, stk)
+            if detail is None:
+                log.info("stack '%s' is valid", name)
+            else:
+                log.error("stack '%s' failed validation: %s", name, detail)
+                ok = False
+        return ok

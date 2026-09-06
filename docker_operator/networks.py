@@ -14,9 +14,14 @@ def parse_networks(config_json: str) -> tuple[set[str], set[str]]:
         log.warning("could not parse compose config json: %s", exc)
         return set(), set()
 
+    # Defends against any unexpected shape, not just malformed JSON; `docker compose config` output is trusted but not guaranteed
+    networks = data.get("networks") if isinstance(data, dict) else None
+    if not isinstance(networks, dict):
+        networks = {}
+
     owned: set[str] = set()
     external: set[str] = set()
-    for key, val in (data.get("networks") or {}).items():
+    for key, val in networks.items():
         if not isinstance(val, dict):
             continue
         actual = val.get("name") or key

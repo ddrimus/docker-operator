@@ -62,6 +62,14 @@ def make_handler(settings: Settings):
             self._send(200, "ok") if self.path == "/healthz" else self._send(404, "not found")
 
         def do_POST(self):
+            try:
+                self._handle_webhook()
+            except Exception:
+                # Keeps a client disconnect mid-body or similar off the raw stderr traceback socketserver would otherwise print
+                log.exception("unhandled error handling webhook from %s", self.client_address[0])
+                self._send(500, "internal error")
+
+        def _handle_webhook(self):
             if self.path != settings.webhook_path:
                 self._send(404, "not found")
                 return
@@ -117,8 +125,10 @@ class _Server(ThreadingHTTPServer):
 
 def run(settings: Settings) -> None:
     stop = threading.Event()
-    threading.Thread(target=_worker_loop, args=(settings, stop), daemon=True, name="resync-worker").start()
-    threading.Thread(target=_poll_loop, args=(settings, stop), daemon=True, name="resync-poller").start()
+    worker = threading.Thread(target=_worker_loop, args=(settings, stop), daemon=True, name="resync-worker")
+    poller = threading.Thread(target=_poll_loop, args=(settings, stop), daemon=True, name="resync-poller")
+    worker.start()
+    poller.start()
 
     # Self-heal after downtime / missed webhooks
     request_resync()
@@ -141,4 +151,7 @@ def run(settings: Settings) -> None:
         stop.set()
         # No-op if the SIGTERM path already triggered it
         httpd.shutdown()
+        # Both threads are daemons and would otherwise be killed mid-reconcile once this function returns
+        worker.join(timeout=5)
+        poller.join(timeout=5)
         log.info("shutdown complete")
