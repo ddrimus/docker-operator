@@ -33,6 +33,8 @@ def sync_repo(repo_url: str, branch: str, repo_dir: Path, timeout: int = 120) ->
         return head, True
 
     try:
+        # A prior clone/sync may have single-branch-restricted the fetch refspec to a different branch than the one requested now
+        _run(["git", "remote", "set-branches", "origin", branch], repo_dir, 10, env)
         _run(["git", "fetch", "--prune", "origin", branch], repo_dir, timeout, env)
         _run(["git", "reset", "--hard", f"origin/{branch}"], repo_dir, 30, env)
         # -fdx also clears untracked/gitignored leftovers, since discover_stacks() only checks for a compose.yaml on disk, not git tracking

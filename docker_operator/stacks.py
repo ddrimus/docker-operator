@@ -12,6 +12,10 @@ ENV_CONFIG_FILE = ".env.config"
 ENV_SECRETS_FILE = ".env.secrets.encrypted"
 TRACKED_FILES = (COMPOSE_FILE, ENV_CONFIG_FILE, ENV_SECRETS_FILE)
 
+# Like TRACKED_FILES, these must be committed to git: git clean -fdx in sync_repo() wipes anything untracked
+PAUSE_FILE = ".paused"
+DEPENDS_ON_FILE = ".depends_on"
+
 
 # A discovered stack's name and directory, exposing paths to its tracked files
 @dataclass(frozen=True)
@@ -31,11 +35,26 @@ class Stack:
     def env_secrets_file(self) -> Path:
         return self.path / ENV_SECRETS_FILE
 
+    @property
+    def paused(self) -> bool:
+        return (self.path / PAUSE_FILE).is_file()
+
+    # Names of other stacks this one must deploy after, beyond what's already implied by Docker network ownership
+    @property
+    def depends_on(self) -> frozenset[str]:
+        f = self.path / DEPENDS_ON_FILE
+        if not f.is_file():
+            return frozenset()
+        lines = (line.partition("#")[0].strip() for line in f.read_text().splitlines())
+        return frozenset(name for name in lines if name)
+
 
 # Find stack directories under compose_root that contain a compose.yaml
 def discover_stacks(compose_root: Path) -> dict[str, Stack]:
     stacks: dict[str, Stack] = {}
     if not compose_root.is_dir():
+        # Could be a genuinely empty repo, or COMPOSE_SUBDIR misconfigured; either way, worth surfacing rather than silently discovering nothing forever
+        log.warning("compose root %s does not exist, no stacks discovered", compose_root)
         return stacks
     for entry in sorted(compose_root.iterdir()):
         if not entry.is_dir():
