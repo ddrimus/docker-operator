@@ -91,6 +91,24 @@ def test_deploy_uid_gid_parsed_when_set(monkeypatch):
     assert s.deploy_gid == 1001
 
 
+def test_negative_deploy_uid_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_UID="-5")
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_negative_deploy_gid_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_GID="-5")
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_deploy_uid_past_the_valid_id_range_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, DEPLOY_UID="99999999999")
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
 def test_invalid_deploy_uid_exits_fatal(monkeypatch):
     _set_env(monkeypatch, DEPLOY_UID="not-a-number")
     with pytest.raises(SystemExit):
@@ -176,6 +194,77 @@ def test_sops_key_file_ok_when_present(monkeypatch, tmp_path):
     key.write_text("AGE-SECRET-KEY-1FAKEKEYFORTESTONLY")
     _set_env(monkeypatch, SOPS_AGE_KEY_FILE=str(key))
     assert load_settings().sops_age_key_file == key
+
+
+def test_sops_key_file_warns_when_group_or_other_readable(monkeypatch, tmp_path, capsys):
+    key = tmp_path / "age.key"
+    key.write_text("AGE-SECRET-KEY-1FAKEKEYFORTESTONLY")
+    key.chmod(0o644)
+    _set_env(monkeypatch, SOPS_AGE_KEY_FILE=str(key))
+    load_settings()
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_sops_key_file_no_warning_when_owner_only(monkeypatch, tmp_path, capsys):
+    key = tmp_path / "age.key"
+    key.write_text("AGE-SECRET-KEY-1FAKEKEYFORTESTONLY")
+    key.chmod(0o600)
+    _set_env(monkeypatch, SOPS_AGE_KEY_FILE=str(key))
+    load_settings()
+    assert "WARNING" not in capsys.readouterr().err
+
+
+# --- LISTEN_PORT validation ---
+
+def test_listen_port_zero_is_allowed(monkeypatch):
+    _set_env(monkeypatch, LISTEN_PORT="0")
+    assert load_settings().listen_port == 0
+
+
+def test_listen_port_too_high_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, LISTEN_PORT="99999")
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_listen_port_negative_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, LISTEN_PORT="-1")
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+# --- REGISTRY_* validation ---
+
+def test_registry_host_alone_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, REGISTRY_HOST="registry.example.com")
+    monkeypatch.delenv("REGISTRY_USERNAME", raising=False)
+    monkeypatch.delenv("REGISTRY_PASSWORD", raising=False)
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_registry_username_and_password_without_host_exits_fatal(monkeypatch):
+    _set_env(monkeypatch, REGISTRY_USERNAME="user", REGISTRY_PASSWORD="s3cr3t")
+    monkeypatch.delenv("REGISTRY_HOST", raising=False)
+    with pytest.raises(SystemExit):
+        load_settings()
+
+
+def test_registry_all_three_set_together_is_ok(monkeypatch):
+    _set_env(monkeypatch, REGISTRY_HOST="registry.example.com",
+             REGISTRY_USERNAME="user", REGISTRY_PASSWORD="s3cr3t")
+    s = load_settings()
+    assert s.registry_host == "registry.example.com"
+    assert s.registry_username == "user"
+    assert s.registry_password == "s3cr3t"
+
+
+def test_registry_all_three_unset_is_ok(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.delenv("REGISTRY_HOST", raising=False)
+    monkeypatch.delenv("REGISTRY_USERNAME", raising=False)
+    monkeypatch.delenv("REGISTRY_PASSWORD", raising=False)
+    assert load_settings().registry_host is None
 
 
 # --- GIT_REPO_URL local-path validation ---

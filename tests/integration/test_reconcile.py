@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from docker_operator import state as state_mod
-from docker_operator.reconcile import reconcile
+from docker_operator.reconcile import reconcile, validate
 from conftest import add_stack, make_settings
 
 
@@ -255,6 +255,25 @@ def test_force_unrelated_stack_name_does_not_affect_others(git_repo, tmp_path, d
     assert deployed == []
 
 
+def test_force_on_a_stack_already_removed_from_repo_persists_immediately(git_repo, tmp_path, deployed):
+    import subprocess, shutil
+    add_stack(git_repo, "ghost")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    st = state_mod.load(settings.state_file)
+    assert "ghost" in st["stacks"]
+
+    shutil.rmtree(git_repo / "compose" / "ghost")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove ghost"], cwd=git_repo, check=True, capture_output=True)
+
+    # No other stacks changed this pass: the force-clear itself must still reach disk
+    reconcile(settings, force={"ghost"})
+
+    st = state_mod.load(settings.state_file)
+    assert "ghost" not in st["stacks"]
+
+
 def test_unreachable_git_with_no_previous_checkout_notifies_and_returns_cleanly(tmp_path, deployed):
     settings = make_settings(tmp_path, git_repo_url=str(tmp_path / "no-such-repo"))
     notified = []
@@ -472,3 +491,254 @@ def test_successful_deploy_clears_prior_retry_state(git_repo, tmp_path, deployed
     st = state_mod.load(settings.state_file)
     assert "flaky" not in st.get("retries", {})
     assert "flaky" in st["stacks"]
+
+
+# --- recovered notification ---
+
+def test_recovered_notification_sent_after_a_prior_failure(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "flaky", compose="services:\n  flaky:\n    image: flaky:v1\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("boom")):
+        reconcile(settings)
+
+    add_stack(git_repo, "flaky", compose="services:\n  flaky:\n    image: flaky:v2\n")
+    notified = []
+    with patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+        # deployed fixture patches resolve_config/up back to succeeding
+        reconcile(settings)
+
+    assert len(notified) == 1
+    assert "recovered" in notified[0]
+
+
+def test_no_recovered_notification_on_an_ordinary_first_deploy(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    notified = []
+    with patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+        reconcile(settings)
+
+    assert notified == []
+
+
+# --- .paused ---
+
+def test_paused_stack_is_skipped_even_when_its_files_changed(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    add_stack(git_repo, "traefik", compose="services:\n  traefik:\n    image: traefik:v2\n", commit=False)
+    (git_repo / "compose" / "traefik" / ".paused").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "pause traefik"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings)
+
+    assert deployed == []
+    st = state_mod.load(settings.state_file)
+    assert "traefik" in st["stacks"]
+
+
+def test_paused_stack_is_not_torn_down_when_prune_enabled(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
+    reconcile(settings)
+    deployed.clear()
+
+    (git_repo / "compose" / "traefik" / ".paused").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "pause traefik"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings)
+
+    assert ("down", "traefik") not in deployed
+    st = state_mod.load(settings.state_file)
+    assert "traefik" in st["stacks"]
+
+
+def test_unpausing_picks_up_changes_made_while_paused(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    add_stack(git_repo, "traefik", compose="services:\n  traefik:\n    image: traefik:v2\n", commit=False)
+    (git_repo / "compose" / "traefik" / ".paused").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "pause traefik"], cwd=git_repo, check=True, capture_output=True)
+    reconcile(settings)
+    assert deployed == []
+
+    (git_repo / "compose" / "traefik" / ".paused").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "unpause traefik"], cwd=git_repo, check=True, capture_output=True)
+    reconcile(settings)
+
+    assert deployed == [("up", "traefik")]
+
+
+def test_force_deploys_a_paused_stack(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    (git_repo / "compose" / "traefik" / ".paused").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "pause traefik"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings, force={"traefik"})
+
+    assert deployed == [("up", "traefik")]
+
+
+def test_force_all_deploys_paused_stacks_too(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    (git_repo / "compose" / "traefik" / ".paused").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "pause traefik"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings, force={"all"})
+
+    assert deployed == [("up", "traefik")]
+
+
+def test_force_on_unrelated_stack_does_not_unpause_others(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "traefik")
+    add_stack(git_repo, "forgejo")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    deployed.clear()
+
+    (git_repo / "compose" / "traefik" / ".paused").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "pause traefik"], cwd=git_repo, check=True, capture_output=True)
+
+    reconcile(settings, force={"forgejo"})
+
+    assert ("up", "traefik") not in deployed
+    assert ("up", "forgejo") in deployed
+
+
+# --- .depends_on ---
+
+def test_explicit_depends_on_orders_deploy_without_any_network_relationship(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "db")
+    add_stack(git_repo, "app", commit=False)
+    (git_repo / "compose" / "app" / ".depends_on").write_text("db\n")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "add app depending on db"], cwd=git_repo, check=True, capture_output=True)
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    reconcile(settings)
+
+    order = [project for action, project in deployed]
+    assert order.index("db") < order.index("app")
+
+
+def test_depends_on_naming_a_stack_outside_this_batch_is_ignored(git_repo, tmp_path, deployed):
+    import subprocess
+    add_stack(git_repo, "app", commit=False)
+    (git_repo / "compose" / "app" / ".depends_on").write_text("not-a-real-stack\n")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "add app"], cwd=git_repo, check=True, capture_output=True)
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    reconcile(settings)
+
+    assert deployed == [("up", "app")]
+
+
+# --- validate() ---
+
+def test_validate_returns_true_when_every_stack_is_valid(git_repo, tmp_path):
+    add_stack(git_repo, "good")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json):
+        assert validate(settings) is True
+
+
+def test_validate_returns_false_when_any_stack_is_invalid(git_repo, tmp_path):
+    add_stack(git_repo, "good")
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        if project == "bad":
+            raise RuntimeError("invalid compose file")
+        return _no_networks_json()
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect):
+        assert validate(settings) is False
+
+
+def test_validate_never_calls_compose_up(git_repo, tmp_path):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up") as mock_up:
+        validate(settings)
+
+    mock_up.assert_not_called()
+
+
+def test_validate_leaves_deploy_dir_and_state_untouched(git_repo, tmp_path):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json):
+        validate(settings)
+
+    assert not settings.deploy_dir.exists()
+    assert not settings.state_file.exists()
+
+
+def test_validate_returns_false_when_repo_unreachable_with_no_cache(tmp_path):
+    settings = make_settings(tmp_path, git_repo_url=str(tmp_path / "no-such-repo"))
+    assert validate(settings) is False
+
+
+def test_validate_uses_cached_checkout_when_remote_becomes_unreachable(git_repo, tmp_path):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json):
+        assert validate(settings) is True
+
+    moved_away = git_repo.parent / "moved-away"
+    git_repo.rename(moved_away)
+    try:
+        with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json):
+            assert validate(settings) is True
+    finally:
+        moved_away.rename(git_repo)
+
+
+# --- corrupted state.json ---
+
+def test_reconcile_recovers_from_a_malformed_state_file_instead_of_crashing(git_repo, tmp_path, deployed):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    settings.state_file.parent.mkdir(parents=True, exist_ok=True)
+    settings.state_file.write_text('{"stacks": ["not", "a", "dict"]}')
+
+    # Must not raise: treated the same as a fresh install, redeploys everything
+    reconcile(settings)
+
+    assert deployed == [("up", "traefik")]

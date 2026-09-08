@@ -92,6 +92,21 @@ def test_missing_signature_rejected(running_server):
     assert status == 401
 
 
+def test_unexpected_error_returns_500_not_a_crashed_connection(running_server):
+    base_url, settings = running_server
+    body = json.dumps({"ref": "refs/heads/main"}).encode()
+    with patch("docker_operator.server.verify_signature", side_effect=RuntimeError("boom")):
+        status, _ = _post(base_url, settings.webhook_path, body, {
+            "X-Forgejo-Signature": _sign(body),
+            "X-Forgejo-Event": "push",
+        })
+    assert status == 500
+
+    # The server itself must still be up for the next request
+    with urllib.request.urlopen(base_url + "/healthz", timeout=3) as resp:
+        assert resp.status == 200
+
+
 def test_gitea_style_signature_header_accepted(running_server):
     # Both "Forgejo" and "Gitea" webhook payload formats are first-party here, unlike GitHub/GitLab
     base_url, settings = running_server

@@ -58,6 +58,18 @@ def test_malformed_json_returns_empty_sets_not_raises():
     assert external == set()
 
 
+def test_non_dict_networks_key_is_skipped_not_crashed():
+    owned, external = parse_networks(json.dumps({"networks": ["not", "a", "dict"]}))
+    assert owned == set()
+    assert external == set()
+
+
+def test_non_dict_top_level_json_is_skipped_not_crashed():
+    owned, external = parse_networks(json.dumps(["not", "an", "object"]))
+    assert owned == set()
+    assert external == set()
+
+
 def test_topo_order_respects_simple_dependency():
     order = topo_order(["b", "a"], {"b": {"a"}})
     assert order.index("a") < order.index("b")

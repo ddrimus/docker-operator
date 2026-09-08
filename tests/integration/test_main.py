@@ -181,3 +181,50 @@ def test_main_healthcheck_flag_returns_cleanly_on_success(monkeypatch, tmp_path)
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# --- --validate ---
+
+def _set_validate_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("WEBHOOK_SECRET", "s")
+    monkeypatch.setenv("GIT_REPO_URL", "https://example.com/x.git")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DEPLOY_DIR", str(tmp_path / "deploy"))
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+
+
+def test_validate_flag_exits_zero_when_all_stacks_valid(monkeypatch, tmp_path):
+    _argv(monkeypatch, "--validate")
+    _set_validate_env(monkeypatch, tmp_path)
+
+    with patch("docker_operator.__main__.validate", return_value=True) as mock_validate:
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    mock_validate.assert_called_once()
+    assert exc_info.value.code == 0
+
+
+def test_validate_flag_exits_nonzero_when_a_stack_is_invalid(monkeypatch, tmp_path):
+    _argv(monkeypatch, "--validate")
+    _set_validate_env(monkeypatch, tmp_path)
+
+    with patch("docker_operator.__main__.validate", return_value=False):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    assert exc_info.value.code != 0
+
+
+def test_validate_flag_never_starts_the_server_or_reconciles(monkeypatch, tmp_path):
+    _argv(monkeypatch, "--validate")
+    _set_validate_env(monkeypatch, tmp_path)
+
+    with patch("docker_operator.__main__.validate", return_value=True), \
+         patch("docker_operator.__main__.reconcile") as mock_reconcile, \
+         patch("docker_operator.__main__.run") as mock_run:
+        with pytest.raises(SystemExit):
+            main()
+
+    mock_reconcile.assert_not_called()
+    mock_run.assert_not_called()

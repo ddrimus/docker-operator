@@ -1,4 +1,5 @@
 from __future__ import annotations
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -37,4 +38,24 @@ def test_failure_is_logged_not_raised(tmp_path: Path):
         mock_run.return_value.returncode = 1
         mock_run.return_value.stderr = "unauthorized"
         # Must not raise
+        login(settings)
+
+
+def test_timeout_is_logged_not_raised(tmp_path: Path):
+    settings = make_settings(
+        tmp_path, git_repo_url=str(tmp_path),
+        registry_host="registry.example.com", registry_username="user", registry_password="s3cr3t",
+    )
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="docker login", timeout=30)):
+        # Must not raise
+        login(settings)
+
+
+def test_missing_docker_binary_is_logged_not_raised(tmp_path: Path):
+    settings = make_settings(
+        tmp_path, git_repo_url=str(tmp_path),
+        registry_host="registry.example.com", registry_username="user", registry_password="s3cr3t",
+    )
+    with patch("subprocess.run", side_effect=FileNotFoundError("docker")):
+        # Must not raise: registry login failing must never take the whole operator down at startup
         login(settings)
