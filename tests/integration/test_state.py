@@ -28,6 +28,24 @@ def test_load_corrupted_json_returns_fresh_state_not_raise(tmp_path: Path):
     assert state.load(sf) == {"stacks": {}}
 
 
+def test_load_non_object_json_returns_fresh_state_not_raise(tmp_path: Path):
+    sf = tmp_path / "state.json"
+    sf.write_text("[1, 2, 3]")
+    assert state.load(sf) == {"stacks": {}}
+
+
+def test_load_stacks_key_wrong_type_returns_fresh_state_not_raise(tmp_path: Path):
+    sf = tmp_path / "state.json"
+    sf.write_text('{"stacks": ["not", "a", "dict"]}')
+    assert state.load(sf) == {"stacks": {}}
+
+
+def test_load_retries_key_wrong_type_returns_fresh_state_not_raise(tmp_path: Path):
+    sf = tmp_path / "state.json"
+    sf.write_text('{"stacks": {}, "retries": "not a dict"}')
+    assert state.load(sf) == {"stacks": {}}
+
+
 def test_save_is_atomic_no_tmp_file_left_behind(tmp_path: Path):
     sf = tmp_path / "state.json"
     state.save(sf, {"stacks": {"a": {"hash": "1"}}})

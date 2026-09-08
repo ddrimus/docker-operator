@@ -85,6 +85,20 @@ def test_wrong_branch_name_raises_on_first_clone(git_repo: Path, tmp_path: Path)
         sync_repo(str(git_repo), "does-not-exist-branch", dest)
 
 
+def test_switching_branch_on_an_existing_checkout_follows_the_new_branch(git_repo: Path, tmp_path: Path):
+    dest = tmp_path / "dest"
+    sync_repo(str(git_repo), "main", dest)
+
+    # The first clone's --single-branch restricts the fetch refspec to "main": switching GIT_BRANCH must not get stuck on it
+    subprocess.run(["git", "checkout", "-q", "-b", "develop"], cwd=git_repo, check=True, capture_output=True)
+    add_stack(git_repo, "only-on-develop")
+
+    head, synced = sync_repo(str(git_repo), "develop", dest)
+
+    assert synced is True
+    assert (dest / "compose" / "only-on-develop").is_dir()
+
+
 def test_clone_failure_never_logs_url_credentials(tmp_path, caplog):
     # Nothing listens on port 9, so the clone fails right away without touching the network
     from docker_operator.util import exc_detail

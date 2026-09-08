@@ -20,6 +20,12 @@ def test_discover_missing_root_returns_empty(tmp_path: Path):
     assert discover_stacks(tmp_path / "does-not-exist") == {}
 
 
+def test_discover_missing_root_logs_a_warning(tmp_path: Path, caplog):
+    with caplog.at_level("WARNING"):
+        discover_stacks(tmp_path / "does-not-exist")
+    assert "does not exist" in caplog.text
+
+
 def test_discover_skips_dirs_without_compose_yaml(tmp_path: Path, caplog):
     root = tmp_path / "compose"
     root.mkdir()
@@ -108,3 +114,65 @@ def test_hash_differs_for_missing_vs_present_optional_files(tmp_path: Path):
     _write_stack(root, "with-config", env_config="")
     stacks = discover_stacks(root)
     assert stack_hash(stacks["no-config"]) != stack_hash(stacks["with-config"])
+
+
+# --- Stack.paused ---
+
+def test_stack_not_paused_by_default(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    _write_stack(root, "s")
+    assert discover_stacks(root)["s"].paused is False
+
+
+def test_stack_paused_when_marker_file_present(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s")
+    (d / ".paused").write_text("")
+    assert discover_stacks(root)["s"].paused is True
+
+
+def test_paused_marker_does_not_affect_stack_hash(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s")
+    h1 = stack_hash(discover_stacks(root)["s"])
+    (d / ".paused").write_text("")
+    h2 = stack_hash(discover_stacks(root)["s"])
+    assert h1 == h2
+
+
+# --- Stack.depends_on ---
+
+def test_depends_on_empty_when_file_missing(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    _write_stack(root, "s")
+    assert discover_stacks(root)["s"].depends_on == frozenset()
+
+
+def test_depends_on_parses_one_name_per_line(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s")
+    (d / ".depends_on").write_text("traefik\nforgejo\n")
+    assert discover_stacks(root)["s"].depends_on == frozenset({"traefik", "forgejo"})
+
+
+def test_depends_on_ignores_comments_and_blank_lines(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s")
+    (d / ".depends_on").write_text("# deploy order notes\ntraefik\n\n  \nforgejo  # needs the proxy network too\n")
+    assert discover_stacks(root)["s"].depends_on == frozenset({"traefik", "forgejo"})
+
+
+def test_depends_on_does_not_affect_stack_hash(tmp_path: Path):
+    root = tmp_path / "compose"
+    root.mkdir()
+    d = _write_stack(root, "s")
+    h1 = stack_hash(discover_stacks(root)["s"])
+    (d / ".depends_on").write_text("traefik\n")
+    h2 = stack_hash(discover_stacks(root)["s"])
+    assert h1 == h2
