@@ -68,6 +68,29 @@ def _log_and_notify_failure(settings: Settings, stage: str, name: str, detail: s
                f"docker-operator: `{name}` failed to {stage} (attempt {attempts}/{settings.deploy_max_retries}): {detail}")
 
 
+# Sync the repo, logging (and optionally notifying) on total failure; returns False if the caller should bail
+def _sync_or_bail(settings: Settings, action: str, notify_on_failure: bool) -> bool:
+    try:
+        head, synced = sync_repo(settings.git_repo_url, settings.git_branch, settings.repo_dir)
+    except Exception as exc:
+        detail = exc_detail(exc)
+        log.error("cannot reach %s and no previous checkout exists yet: %s", settings.git_repo_url, detail)
+        if notify_on_failure:
+            notify(settings.notify_webhook_url,
+                   f"docker-operator: cannot reach {settings.git_repo_url} and no cached checkout exists: {detail}")
+        return False
+    if not synced:
+        log.info("forgejo unreachable, %s against last known-good checkout (%s)", action, head[:12])
+    return True
+
+
+# Record and report a validate/deploy failure for one stack, in one place so both call sites can't drift apart
+def _fail_stack(settings: Settings, st: dict, retries: dict, name: str, new_hash: str, stage: str, exc: Exception) -> None:
+    detail = exc_detail(exc)
+    attempts = _record_failure(settings, st, retries, name, new_hash)
+    _log_and_notify_failure(settings, stage, name, detail, attempts)
+
+
 # Cross-process advisory lock so a manual `--once` run can't race the server's background worker thread
 @contextmanager
 def _reconcile_lock(settings: Settings):
@@ -131,16 +154,9 @@ def reconcile(settings: Settings, force: set[str] | None = None) -> None:
 
 
 def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
-    try:
-        head, synced = sync_repo(settings.git_repo_url, settings.git_branch, settings.repo_dir)
-    except Exception as exc:
-        detail = exc_detail(exc)
-        log.error("cannot reach %s and no previous checkout exists yet: %s", settings.git_repo_url, detail)
-        notify(settings.notify_webhook_url,
-               f"docker-operator: cannot reach {settings.git_repo_url} and no cached checkout exists: {detail}")
+    start = time.time()
+    if not _sync_or_bail(settings, "reconciling", notify_on_failure=True):
         return
-    if not synced:
-        log.info("forgejo unreachable, reconciling against last known-good checkout (%s)", head[:12])
 
     st = state_mod.load(settings.state_file)
     known: dict = st.setdefault("stacks", {})
@@ -172,9 +188,12 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
     if not changed and not removed:
         suffix = f", {deferred} deferred by retry backoff/limit" if deferred else ""
         suffix += f", {len(paused)} paused" if paused else ""
-        log.info("reconcile: no changes (%d stacks up to date%s)", len(current), suffix)
+        log.info("reconcile: no changes (%d stacks up to date%s) in %.1fs", len(current), suffix, time.time() - start)
         return
-    log.info("reconcile: %d changed, %d removed%s%s", len(changed), len(removed),
+    changed_names = f" [{', '.join(sorted(stk.name for stk, _ in changed))}]" if changed else ""
+    removed_names = f" [{', '.join(sorted(removed))}]" if removed else ""
+    log.info("reconcile: %d changed%s, %d removed%s%s%s",
+              len(changed), changed_names, len(removed), removed_names,
               f", {deferred} deferred" if deferred else "",
               f", {len(paused)} paused" if paused else "")
 
@@ -187,9 +206,7 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
         try:
             staged_compose, staged_env, owned, external = _stage(settings, stk, deploy_path)
         except Exception as exc:
-            detail = exc_detail(exc)
-            attempts = _record_failure(settings, st, retries, stk.name, new_hash)
-            _log_and_notify_failure(settings, "validate", stk.name, detail, attempts)
+            _fail_stack(settings, st, retries, stk.name, new_hash, "validate", exc)
             continue
         for n in owned:
             owners.setdefault(n, stk.name)
@@ -208,17 +225,16 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
         stk, staged_compose, staged_env, new_hash = staged[name]
         deploy_path = _deploy_path(settings, name)
         was_failing = name in retries
+        stack_start = time.time()
         try:
             log.info("deploying stack '%s'", name)
             _promote_and_up(settings, name, deploy_path, staged_compose, staged_env)
             _remember_stack(settings, st, known, retries, name, new_hash)
-            log.info("stack '%s' deployed OK -> %s", name, deploy_path)
+            log.info("stack '%s' deployed OK in %.1fs -> %s", name, time.time() - stack_start, deploy_path)
             if was_failing:
                 notify(settings.notify_webhook_url, f"docker-operator: `{name}` recovered and deployed OK")
         except Exception as exc:
-            detail = exc_detail(exc)
-            attempts = _record_failure(settings, st, retries, name, new_hash)
-            _log_and_notify_failure(settings, "deploy", name, detail, attempts)
+            _fail_stack(settings, st, retries, name, new_hash, "deploy", exc)
 
     if removed:
         if settings.prune_removed_stacks:
@@ -244,6 +260,8 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
         else:
             log.warning("stack(s) removed from repo, PRUNE_REMOVED_STACKS=false, left on disk: %s", removed)
 
+    log.info("reconcile finished in %.1fs", time.time() - start)
+
 
 # Render and validate one stack's compose config in an isolated scratch dir, touching nothing persistent
 def _validate_stack(settings: Settings, stk: Stack) -> str | None:
@@ -261,14 +279,10 @@ def _validate_stack(settings: Settings, stk: Stack) -> str | None:
 
 # Sync the repo and validate every discovered stack's compose config without deploying anything, for CI use ahead of a real reconcile
 def validate(settings: Settings) -> bool:
+    start = time.time()
     with _reconcile_lock(settings):
-        try:
-            head, synced = sync_repo(settings.git_repo_url, settings.git_branch, settings.repo_dir)
-        except Exception as exc:
-            log.error("cannot reach %s and no previous checkout exists yet: %s", settings.git_repo_url, exc_detail(exc))
+        if not _sync_or_bail(settings, "validating", notify_on_failure=False):
             return False
-        if not synced:
-            log.info("forgejo unreachable, validating against last known-good checkout (%s)", head[:12])
 
         current = discover_stacks(settings.compose_root)
         ok = True
@@ -279,4 +293,5 @@ def validate(settings: Settings) -> bool:
             else:
                 log.error("stack '%s' failed validation: %s", name, detail)
                 ok = False
+        log.info("validate: %d stack(s) checked in %.1fs", len(current), time.time() - start)
         return ok

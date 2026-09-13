@@ -47,6 +47,9 @@ def make_handler(settings: Settings):
         timeout = 15
 
         def log_message(self, fmt, *args):
+            # The container HEALTHCHECK hits this every 30s forever: logging it would drown out everything else
+            if self.path == "/healthz":
+                return
             log.info("%s - %s", self.client_address[0], fmt % args)
 
         def _send(self, code: int, body: str = "") -> None:
