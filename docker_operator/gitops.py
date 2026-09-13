@@ -47,5 +47,6 @@ def sync_repo(repo_url: str, branch: str, repo_dir: Path, timeout: int = 120) ->
         return head, False
 
     head = _run(["git", "rev-parse", "HEAD"], repo_dir, 10, env).stdout.strip()
-    log.info("repo synced at %s", head[:12])
+    # Routine confirmation, not news: reconcile()'s own summary line right after this is what actually matters
+    log.debug("repo synced at %s", head[:12])
     return head, True

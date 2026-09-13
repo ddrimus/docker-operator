@@ -16,7 +16,8 @@ class DeployError(RuntimeError):
 
 # Run a docker compose command, raising DeployError on nonzero exit or timeout
 def _run(args: list[str], timeout: int, capture: bool = False) -> str:
-    log.info("+ %s", " ".join(args))
+    # Raw invocation is DEBUG-only noise once things are working; reconcile.py's own before/after lines carry the INFO-level story
+    log.debug("+ %s", " ".join(args))
     try:
         proc = subprocess.run(args, timeout=timeout, capture_output=True, text=True)
     except subprocess.TimeoutExpired as exc:
