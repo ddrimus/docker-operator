@@ -50,6 +50,36 @@ def test_new_stack_gets_staged_and_deployed(git_repo, tmp_path, deployed):
     assert "traefik" in st["stacks"]
 
 
+def test_reconcile_summary_names_the_changed_stacks(git_repo, tmp_path, deployed, caplog):
+    add_stack(git_repo, "traefik")
+    add_stack(git_repo, "forgejo")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with caplog.at_level("INFO", logger="docker_operator.reconcile"):
+        reconcile(settings)
+
+    summary = next(r.message for r in caplog.records if r.message.startswith("reconcile: "))
+    assert "forgejo" in summary
+    assert "traefik" in summary
+
+
+def test_reconcile_summary_names_removed_stacks(git_repo, tmp_path, deployed, caplog):
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
+    reconcile(settings)
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    with caplog.at_level("INFO", logger="docker_operator.reconcile"):
+        reconcile(settings)
+
+    summary = next(r.message for r in caplog.records if r.message.startswith("reconcile: "))
+    assert "temp" in summary
+
+
 def test_unchanged_stack_is_not_redeployed_on_second_pass(git_repo, tmp_path, deployed):
     add_stack(git_repo, "traefik")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
