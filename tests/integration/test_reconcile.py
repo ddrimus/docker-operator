@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from docker_operator import state as state_mod
+from docker_operator.notify import COLOR_ERROR, COLOR_SUCCESS, COLOR_WARNING
 from docker_operator.reconcile import reconcile, validate
 from conftest import add_stack, make_settings
 
@@ -28,6 +29,18 @@ def deployed(tmp_path):
     with patch("docker_operator.compose.up", side_effect=fake_up), \
          patch("docker_operator.compose.down", side_effect=fake_down), \
          patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json):
+        yield calls
+
+
+# Track every notify() call as (title, description, color), regardless of settings.notify_webhook_url
+@pytest.fixture
+def notified():
+    calls: list[tuple[str, str, int]] = []
+
+    def fake_notify(url, title, description, color):
+        calls.append((title, description, color))
+
+    with patch("docker_operator.reconcile.notify", side_effect=fake_notify):
         yield calls
 
 
@@ -304,15 +317,16 @@ def test_force_on_a_stack_already_removed_from_repo_persists_immediately(git_rep
     assert "ghost" not in st["stacks"]
 
 
-def test_unreachable_git_with_no_previous_checkout_notifies_and_returns_cleanly(tmp_path, deployed):
+def test_unreachable_git_with_no_previous_checkout_notifies_and_returns_cleanly(tmp_path, deployed, notified):
     settings = make_settings(tmp_path, git_repo_url=str(tmp_path / "no-such-repo"))
-    notified = []
-    with patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
-        # Must not raise
-        reconcile(settings)
+    # Must not raise
+    reconcile(settings)
     assert deployed == []
     assert len(notified) == 1
-    assert "cannot reach" in notified[0]
+    title, description, color = notified[0]
+    assert "Git Unreachable" in title
+    assert str(tmp_path / "no-such-repo") in description
+    assert color == COLOR_ERROR
 
 
 def test_reconcile_lock_is_released_after_call_allows_second_call(git_repo, tmp_path, deployed):
@@ -325,20 +339,20 @@ def test_reconcile_lock_is_released_after_call_allows_second_call(git_repo, tmp_
     assert True
 
 
-def test_deploy_failure_notification_includes_stderr_detail(git_repo, tmp_path):
+def test_deploy_failure_notification_includes_stderr_detail(git_repo, tmp_path, notified):
     add_stack(git_repo, "traefik")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
     from docker_operator.compose import DeployError
 
-    notified = []
     with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
          patch("docker_operator.compose.up",
-               side_effect=DeployError("command failed: ...", stderr="port 80 already allocated\n")), \
-         patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+               side_effect=DeployError("command failed: ...", stderr="port 80 already allocated\n")):
         reconcile(settings)
 
     assert len(notified) == 1
-    assert "port 80 already allocated" in notified[0]
+    title, description, color = notified[0]
+    assert "port 80 already allocated" in description
+    assert color == COLOR_WARNING
 
 
 def test_self_heals_after_remote_becomes_unreachable_then_recovers(git_repo, tmp_path, deployed):
@@ -383,27 +397,27 @@ def test_teardown_skipped_when_nothing_promoted_to_disk_yet(git_repo, tmp_path, 
     assert "ghost" not in st["stacks"]
 
 
-def test_teardown_failure_notifies_and_keeps_state_for_retry(git_repo, tmp_path):
+def test_teardown_failure_notifies_and_keeps_state_for_retry(git_repo, tmp_path, notified):
     import subprocess, shutil
     add_stack(git_repo, "temp")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
 
     with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
          patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
+        # First pass: "temp" deploys cleanly, its own recap is not what this test is about
         reconcile(settings)
 
     shutil.rmtree(git_repo / "compose" / "temp")
     subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
 
-    notified = []
     from docker_operator.compose import DeployError
-    with patch("docker_operator.compose.down", side_effect=DeployError("down failed", stderr="container busy\n")), \
-         patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+    with patch("docker_operator.compose.down", side_effect=DeployError("down failed", stderr="container busy\n")):
         reconcile(settings)
 
-    assert len(notified) == 1
-    assert "container busy" in notified[0]
+    title, description, color = notified[-1]
+    assert "container busy" in description
+    assert color == COLOR_ERROR
     st = state_mod.load(settings.state_file)
     # Kept for retry, not silently dropped
     assert "temp" in st["stacks"]
@@ -435,18 +449,21 @@ def test_failing_stack_stops_being_attempted_once_retries_are_spent(git_repo, tm
     assert st["retries"]["bad"]["attempts"] == 2
 
 
-def test_retry_notification_only_says_giving_up_on_the_final_attempt(git_repo, tmp_path):
+def test_retry_notification_only_says_giving_up_on_the_final_attempt(git_repo, tmp_path, notified):
     add_stack(git_repo, "bad")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=2, deploy_retry_delay_seconds=0)
 
-    notified: list = []
-    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("boom")), \
-         patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("boom")):
         reconcile(settings)
         reconcile(settings)
 
-    assert "attempt 1/2" in notified[0] and "giving up" not in notified[0]
-    assert "giving up" in notified[1]
+    assert len(notified) == 2
+    first_title, first_description, first_color = notified[0]
+    second_title, second_description, second_color = notified[1]
+    assert "attempt 1/2" in first_description and "giving up" not in first_description
+    assert first_color == COLOR_WARNING
+    assert "giving up" in second_description
+    assert second_color == COLOR_ERROR
 
 
 def test_retry_budget_resets_once_the_stack_content_changes(git_repo, tmp_path):
@@ -525,7 +542,7 @@ def test_successful_deploy_clears_prior_retry_state(git_repo, tmp_path, deployed
 
 # --- recovered notification ---
 
-def test_recovered_notification_sent_after_a_prior_failure(git_repo, tmp_path, deployed):
+def test_recovered_notification_sent_after_a_prior_failure(git_repo, tmp_path, deployed, notified):
     add_stack(git_repo, "flaky", compose="services:\n  flaky:\n    image: flaky:v1\n")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
 
@@ -533,22 +550,102 @@ def test_recovered_notification_sent_after_a_prior_failure(git_repo, tmp_path, d
         reconcile(settings)
 
     add_stack(git_repo, "flaky", compose="services:\n  flaky:\n    image: flaky:v2\n")
-    notified = []
-    with patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
-        # deployed fixture patches resolve_config/up back to succeeding
-        reconcile(settings)
+    # deployed fixture patches resolve_config/up back to succeeding
+    reconcile(settings)
 
-    assert len(notified) == 1
-    assert "recovered" in notified[0]
+    title, description, color = notified[-1]
+    assert "recovered" in description
+    assert color == COLOR_SUCCESS
 
 
-def test_no_recovered_notification_on_an_ordinary_first_deploy(git_repo, tmp_path, deployed):
+def test_recap_notification_sent_even_on_full_success_but_without_recovered_wording(git_repo, tmp_path, deployed, notified):
     add_stack(git_repo, "traefik")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
 
-    notified = []
-    with patch("docker_operator.reconcile.notify", side_effect=lambda url, msg: notified.append(msg)):
+    reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "recovered" not in description
+    assert "deployed OK" in description
+    assert color == COLOR_SUCCESS
+
+
+def test_recap_is_one_notification_covering_every_stack_this_pass(git_repo, tmp_path, notified):
+    add_stack(git_repo, "good")
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        if project == "bad":
+            raise RuntimeError("invalid compose file")
+        return _no_networks_json()
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
         reconcile(settings)
+
+    # One notification for the whole pass, not one per stack
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "good" in description
+    assert "bad" in description
+    assert "invalid compose file" in description
+    assert color == COLOR_WARNING
+
+
+def test_recap_truncates_and_prioritizes_failures_when_many_stacks_at_once(git_repo, tmp_path, notified):
+    for i in range(20):
+        add_stack(git_repo, f"stack{i:02d}")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    failing = {"stack00", "stack01", "stack02"}
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        if project in failing:
+            raise RuntimeError(f"boom for {project}")
+        return _no_networks_json()
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    # All 3 failures survive truncation even though 17 successful stacks would otherwise crowd them out
+    for name in failing:
+        assert name in description
+    assert "more, see logs" in description
+    assert color == COLOR_WARNING
+
+
+def test_no_notification_on_a_pass_with_no_changes(git_repo, tmp_path, deployed, notified):
+    add_stack(git_repo, "traefik")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+    reconcile(settings)
+    assert len(notified) == 1
+    notified.clear()
+
+    # Nothing changed this time: must not notify again
+    reconcile(settings)
+
+    assert notified == []
+
+
+def test_stacks_left_running_when_prune_disabled_never_notify(git_repo, tmp_path, deployed, notified):
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=False)
+    reconcile(settings)
+    notified.clear()
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    # This state persists forever until PRUNE_REMOVED_STACKS is flipped or the stack comes back; must not re-notify every pass
+    reconcile(settings)
+    reconcile(settings)
+    reconcile(settings)
 
     assert notified == []
 

@@ -7,17 +7,24 @@ import shutil
 import tempfile
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from . import compose, secrets, state as state_mod
 from .config import Settings
 from .gitops import sync_repo
 from .networks import parse_networks, priority_sorted, topo_order
-from .notify import notify
+from .notify import COLOR_ERROR, COLOR_SUCCESS, COLOR_WARNING, notify
 from .stacks import Stack, discover_stacks, stack_hash
 from .util import chown_recursive, exc_detail
 
 log = logging.getLogger("docker_operator.reconcile")
+
+# Outcome lines accumulate as (status, line) pairs through a reconcile pass; status is "ok", "warn", or "error"
+Outcome = tuple[str, str]
+
+# Keeps a many-stacks-at-once recap comfortably under Discord's embed description cap, cut at a line boundary rather than mid-word
+_MAX_RECAP_LINES = 15
 
 
 # True if this attempt at new_hash should run now: never attempted, past the backoff delay, or a different hash than what was last failing (a real change resets it)
@@ -53,19 +60,9 @@ def _forget_stack(settings: Settings, st: dict, known: dict, retries: dict, name
     state_mod.save(settings.state_file, st)
 
 
-# Log and notify a validate/deploy failure, wording it as final once the retry budget for this hash is spent
-def _log_and_notify_failure(settings: Settings, stage: str, name: str, detail: str, attempts: int) -> None:
-    if attempts >= settings.deploy_max_retries:
-        log.error("stack '%s' failed to %s: %s (attempt %d/%d, giving up until it changes)",
-                   name, stage, detail, attempts, settings.deploy_max_retries)
-        notify(settings.notify_webhook_url,
-               f"docker-operator: `{name}` failed to {stage} after {attempts} attempt(s), "
-               f"giving up until it changes: {detail}")
-    else:
-        log.error("stack '%s' failed to %s: %s (attempt %d/%d)",
-                   name, stage, detail, attempts, settings.deploy_max_retries)
-        notify(settings.notify_webhook_url,
-               f"docker-operator: `{name}` failed to {stage} (attempt {attempts}/{settings.deploy_max_retries}): {detail}")
+# US-style timestamp used across every notification, so they read consistently regardless of what triggered them
+def _timestamp() -> str:
+    return datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
 
 
 # Sync the repo, logging (and optionally notifying) on total failure; returns False if the caller should bail
@@ -76,19 +73,59 @@ def _sync_or_bail(settings: Settings, action: str, notify_on_failure: bool) -> b
         detail = exc_detail(exc)
         log.error("cannot reach %s and no previous checkout exists yet: %s", settings.git_repo_url, detail)
         if notify_on_failure:
-            notify(settings.notify_webhook_url,
-                   f"docker-operator: cannot reach {settings.git_repo_url} and no cached checkout exists: {detail}")
+            notify(settings.notify_webhook_url, "🚀 Docker Operator — Git Unreachable",
+                   f"Cannot reach the repository and no cached checkout exists to fall back on.\n\n"
+                   f"**Extra Informations**\n"
+                   f"🔗 - Repo: `{settings.git_repo_url}`\n"
+                   f"❗ - Error: `{detail}`\n"
+                   f"🕒 - Time: `{_timestamp()}`",
+                   COLOR_ERROR)
         return False
     if not synced:
         log.info("forgejo unreachable, %s against last known-good checkout (%s)", action, head[:12])
     return True
 
 
-# Record and report a validate/deploy failure for one stack, in one place so both call sites can't drift apart
-def _fail_stack(settings: Settings, st: dict, retries: dict, name: str, new_hash: str, stage: str, exc: Exception) -> None:
+# Record a validate/deploy failure for one stack: log it, and add a recap line. Final give-ups read as errors, everything still within budget reads as a warning
+def _fail_stack(settings: Settings, st: dict, retries: dict, name: str, new_hash: str, stage: str, exc: Exception, outcomes: list[Outcome]) -> None:
     detail = exc_detail(exc)
     attempts = _record_failure(settings, st, retries, name, new_hash)
-    _log_and_notify_failure(settings, stage, name, detail, attempts)
+    gave_up = attempts >= settings.deploy_max_retries
+    if gave_up:
+        log.error("stack '%s' failed to %s: %s (attempt %d/%d, giving up until it changes)",
+                   name, stage, detail, attempts, settings.deploy_max_retries)
+        outcomes.append(("error", f"❌ **{name}** failed to {stage} after {attempts} attempt(s), giving up until it changes:\n> `{detail}`"))
+    else:
+        log.error("stack '%s' failed to %s: %s (attempt %d/%d)", name, stage, detail, attempts, settings.deploy_max_retries)
+        outcomes.append(("warn", f"⚠️ **{name}** failed to {stage} (attempt {attempts}/{settings.deploy_max_retries}):\n> `{detail}`"))
+
+
+# Build and send one end-of-pass recap from every outcome line collected, skipped entirely if nothing happened
+def _send_recap(settings: Settings, outcomes: list[Outcome], elapsed: float) -> None:
+    if not outcomes:
+        return
+    statuses = {status for status, _ in outcomes}
+    color = COLOR_ERROR if "error" in statuses else COLOR_WARNING if "warn" in statuses else COLOR_SUCCESS
+    title = ("🚀 Docker Operator — Reconcile Complete" if color == COLOR_SUCCESS
+             else "🚀 Docker Operator — Reconcile Finished with Errors")
+
+    counts = {status: sum(1 for s, _ in outcomes if s == status) for status in ("ok", "warn", "error")}
+    result = ", ".join(f"{n} {label}" for label, n in
+                        (("succeeded", counts["ok"]), ("warning(s)", counts["warn"]), ("error(s)", counts["error"])) if n)
+
+    # Failures sorted first so a truncated recap never hides the one thing that actually needs attention
+    rank = {"error": 0, "warn": 1, "ok": 2}
+    ordered = sorted(outcomes, key=lambda o: rank[o[0]])
+    shown = [line for _, line in ordered[:_MAX_RECAP_LINES]]
+    if len(ordered) > _MAX_RECAP_LINES:
+        shown.append(f"… and {len(ordered) - _MAX_RECAP_LINES} more, see logs for the full list")
+    body = "\n\n".join(shown)
+    description = (f"{body}\n\n"
+                    f"**Extra Informations**\n"
+                    f"📦 - Result: `{result}`\n"
+                    f"⏱️ - Duration: `{elapsed:.1f}s`\n"
+                    f"🕒 - Time: `{_timestamp()}`")
+    notify(settings.notify_webhook_url, title, description, color)
 
 
 # Cross-process advisory lock so a manual `--once` run can't race the server's background worker thread
@@ -197,6 +234,9 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
               f", {deferred} deferred" if deferred else "",
               f", {len(paused)} paused" if paused else "")
 
+    # Every notable per-stack outcome this pass, folded into one recap notification at the very end instead of one per event
+    outcomes: list[Outcome] = []
+
     # Phase A: stage + validate every changed stack, discover network roles
     staged: dict[str, tuple] = {}
     owners: dict[str, str] = {}
@@ -206,7 +246,7 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
         try:
             staged_compose, staged_env, owned, external = _stage(settings, stk, deploy_path)
         except Exception as exc:
-            _fail_stack(settings, st, retries, stk.name, new_hash, "validate", exc)
+            _fail_stack(settings, st, retries, stk.name, new_hash, "validate", exc, outcomes)
             continue
         for n in owned:
             owners.setdefault(n, stk.name)
@@ -231,10 +271,10 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
             _promote_and_up(settings, name, deploy_path, staged_compose, staged_env)
             _remember_stack(settings, st, known, retries, name, new_hash)
             log.info("stack '%s' deployed OK in %.1fs -> %s", name, time.time() - stack_start, deploy_path)
-            if was_failing:
-                notify(settings.notify_webhook_url, f"docker-operator: `{name}` recovered and deployed OK")
+            outcomes.append(("ok", f"🔁 **{name}** recovered and deployed OK" if was_failing
+                              else f"✅ **{name}** deployed OK"))
         except Exception as exc:
-            _fail_stack(settings, st, retries, name, new_hash, "deploy", exc)
+            _fail_stack(settings, st, retries, name, new_hash, "deploy", exc, outcomes)
 
     if removed:
         if settings.prune_removed_stacks:
@@ -247,20 +287,25 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
                     log.warning("stack '%s' removed from repo, nothing on disk to tear down, dropping from state",
                                 name)
                     _forget_stack(settings, st, known, retries, name)
+                    outcomes.append(("ok", f"🗑️ **{name}** was already gone on disk, dropped from tracking"))
                     continue
                 try:
                     log.warning("stack '%s' removed from repo, tearing down", name)
                     compose.down(compose_file, env_file, name, deploy_path, settings.deploy_timeout_seconds)
                     _forget_stack(settings, st, known, retries, name)
                     shutil.rmtree(deploy_path, ignore_errors=True)
+                    outcomes.append(("ok", f"🗑️ **{name}** removed from repo, torn down"))
                 except Exception as exc:
                     detail = exc_detail(exc)
                     log.error("failed to tear down '%s': %s", name, detail)
-                    notify(settings.notify_webhook_url, f"docker-operator: failed to tear down `{name}`: {detail}")
+                    outcomes.append(("error", f"❌ **{name}** removed from repo but failed to tear down:\n> `{detail}`"))
         else:
+            # Log-only, deliberately: nothing here is ever cleared from `known`, so unlike everything else in outcomes this would re-notify every single pass forever, not just once
             log.warning("stack(s) removed from repo, PRUNE_REMOVED_STACKS=false, left on disk: %s", removed)
 
-    log.info("reconcile finished in %.1fs", time.time() - start)
+    elapsed = time.time() - start
+    _send_recap(settings, outcomes, elapsed)
+    log.info("reconcile finished in %.1fs", elapsed)
 
 
 # Render and validate one stack's compose config in an isolated scratch dir, touching nothing persistent
