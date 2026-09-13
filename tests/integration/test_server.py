@@ -56,6 +56,26 @@ def test_healthz_returns_200(running_server):
         assert resp.status == 200
 
 
+def test_healthz_requests_are_not_logged(running_server, caplog):
+    base_url, _ = running_server
+    with caplog.at_level("INFO", logger="docker_operator.server"):
+        with urllib.request.urlopen(base_url + "/healthz", timeout=3) as resp:
+            assert resp.status == 200
+    assert "/healthz" not in caplog.text
+
+
+def test_webhook_requests_are_still_logged(running_server, caplog):
+    base_url, settings = running_server
+    body = json.dumps({"ref": "refs/heads/main"}).encode()
+    with caplog.at_level("INFO", logger="docker_operator.server"):
+        status, _ = _post(base_url, settings.webhook_path, body, {
+            "X-Forgejo-Signature": _sign(body),
+            "X-Forgejo-Event": "push",
+        })
+    assert status == 202
+    assert settings.webhook_path in caplog.text
+
+
 def test_unknown_get_path_returns_404(running_server):
     base_url, _ = running_server
     with pytest.raises(urllib.error.HTTPError) as exc_info:
