@@ -105,9 +105,12 @@ def _send_recap(settings: Settings, outcomes: list[Outcome], elapsed: float) -> 
     if not outcomes:
         return
     statuses = {status for status, _ in outcomes}
-    color = COLOR_ERROR if "error" in statuses else COLOR_WARNING if "warn" in statuses else COLOR_SUCCESS
-    title = ("🚀 Docker Operator — Reconcile Complete" if color == COLOR_SUCCESS
-             else "🚀 Docker Operator — Reconcile Finished with Errors")
+    if "error" in statuses:
+        color, title = COLOR_ERROR, "🚀 Docker Operator — Reconcile Finished with Errors"
+    elif "warn" in statuses:
+        color, title = COLOR_WARNING, "🚀 Docker Operator — Reconcile Completed with Warnings"
+    else:
+        color, title = COLOR_SUCCESS, "🚀 Docker Operator — Reconcile Complete"
 
     counts = {status: sum(1 for s, _ in outcomes if s == status) for status in ("ok", "warn", "error")}
     result = ", ".join(f"{n} {label}" for label, n in
