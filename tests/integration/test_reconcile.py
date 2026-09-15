@@ -462,8 +462,10 @@ def test_retry_notification_only_says_giving_up_on_the_final_attempt(git_repo, t
     second_title, second_description, second_color = notified[1]
     assert "attempt 1/2" in first_description and "giving up" not in first_description
     assert first_color == COLOR_WARNING
+    assert "Warnings" in first_title and "Errors" not in first_title
     assert "giving up" in second_description
     assert second_color == COLOR_ERROR
+    assert "Errors" in second_title
 
 
 def test_retry_budget_resets_once_the_stack_content_changes(git_repo, tmp_path):
@@ -592,6 +594,9 @@ def test_recap_is_one_notification_covering_every_stack_this_pass(git_repo, tmp_
     assert "bad" in description
     assert "invalid compose file" in description
     assert color == COLOR_WARNING
+    # A stack with retries left is a warning, not an error; the title must not overstate it
+    assert "Warnings" in title
+    assert "Errors" not in title
 
 
 def test_recap_truncates_and_prioritizes_failures_when_many_stacks_at_once(git_repo, tmp_path, notified):
