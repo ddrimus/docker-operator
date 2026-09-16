@@ -144,6 +144,42 @@ def test_healthcheck_succeeds_against_a_real_running_server(monkeypatch, tmp_pat
         httpd.server_close()
 
 
+def test_healthcheck_probes_a_specific_listen_host_not_just_loopback(monkeypatch, tmp_path):
+    # Bound to one address only: 127.0.0.1 gets connection refused even though the server is up
+    settings = make_settings(tmp_path, git_repo_url="https://example.com/x.git", listen_port=0)
+    httpd = server_mod._Server(("127.0.0.2", 0), server_mod.make_handler(settings))
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        time.sleep(0.1)
+        monkeypatch.setenv("LISTEN_HOST", "127.0.0.2")
+        monkeypatch.setenv("LISTEN_PORT", str(port))
+        # Must not raise/exit
+        _healthcheck()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@pytest.mark.parametrize("listen_host,expected", [
+    (None, "http://127.0.0.1:8080/healthz"),
+    ("0.0.0.0", "http://127.0.0.1:8080/healthz"),
+    ("::", "http://[::1]:8080/healthz"),
+    ("192.168.1.10", "http://192.168.1.10:8080/healthz"),
+    ("fd00::10", "http://[fd00::10]:8080/healthz"),
+])
+def test_healthcheck_url_follows_listen_host(monkeypatch, listen_host, expected):
+    if listen_host is None:
+        monkeypatch.delenv("LISTEN_HOST", raising=False)
+    else:
+        monkeypatch.setenv("LISTEN_HOST", listen_host)
+    monkeypatch.setenv("LISTEN_PORT", "8080")
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        _healthcheck()
+    assert mock_urlopen.call_args.args[0] == expected
+
+
 def test_healthcheck_does_not_require_full_settings(monkeypatch):
     # No WEBHOOK_SECRET/GIT_REPO_URL set at all; an unrelated config problem shouldn't make Docker think the listener itself is down
     monkeypatch.delenv("WEBHOOK_SECRET", raising=False)

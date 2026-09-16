@@ -16,8 +16,13 @@ from .util import chown_recursive
 # Container HEALTHCHECK probe; skips load_settings() so an unrelated config error doesn't make Docker think the server is down
 def _healthcheck() -> None:
     port = os.environ.get("LISTEN_PORT", "8080")
+    # A wildcard bind is reachable on loopback; a specific LISTEN_HOST may only be reachable on that address itself
+    host = os.environ.get("LISTEN_HOST", "") or "0.0.0.0"
+    host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    if ":" in host:
+        host = f"[{host}]"
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=3)
+        urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=3)
     except Exception:
         sys.exit(1)
 
