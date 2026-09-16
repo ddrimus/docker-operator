@@ -20,7 +20,7 @@ def deployed(tmp_path):
     # (action, project_name) pairs
     calls: list[tuple[str, str]] = []
 
-    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout):
+    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout, retry_login=None):
         calls.append(("up", project))
 
     def fake_down(compose_file, env_file, project, project_dir, timeout):
@@ -178,7 +178,7 @@ def test_network_owner_deployed_before_dependent(git_repo, tmp_path):
 
     calls: list[str] = []
 
-    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout):
+    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout, retry_login=None):
         calls.append(project)
 
     with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
@@ -214,7 +214,7 @@ def test_deploy_priority_never_overrides_a_real_network_dependency(git_repo, tmp
 
     calls: list[str] = []
 
-    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout):
+    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout, retry_login=None):
         calls.append(project)
 
     with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \

@@ -78,3 +78,45 @@ def test_timeout_with_no_stderr_captured_does_not_crash():
         with pytest.raises(compose.DeployError) as exc_info:
             compose.up(Path("c.yaml"), Path(".env"), "proj", Path("."), pull=False, timeout=30)
     assert exc_info.value.stderr == ""
+
+
+@pytest.mark.parametrize("stderr", [
+    "Error response from daemon: Head \"https://reg/v2/x/y/manifests/v1\": unauthorized",
+    "Error response from daemon: unknown: 404 page not found",
+])
+def test_up_retries_login_and_pull_once_on_auth_looking_pull_failure(stderr):
+    results = iter([_completed(returncode=1, stderr=stderr), _completed(), _completed()])
+    with patch("subprocess.run", side_effect=lambda *a, **k: next(results)) as mock_run:
+        login_calls = []
+        compose.up(Path("c.yaml"), Path(".env"), "proj", Path("."), pull=True, timeout=30,
+                    retry_login=lambda: login_calls.append(1))
+    assert login_calls == [1]
+    calls = [c.args[0] for c in mock_run.call_args_list]
+    assert sum(1 for c in calls if "pull" in c) == 2
+    assert sum(1 for c in calls if "up" in c and "-d" in c) == 1
+
+
+def test_up_does_not_retry_login_when_pull_failure_is_not_auth_looking():
+    with patch("subprocess.run", return_value=_completed(returncode=1, stderr="port 80 already allocated\n")):
+        login_calls = []
+        with pytest.raises(compose.DeployError):
+            compose.up(Path("c.yaml"), Path(".env"), "proj", Path("."), pull=True, timeout=30,
+                        retry_login=lambda: login_calls.append(1))
+    assert login_calls == []
+
+
+def test_up_raises_if_retry_login_pull_fails_again():
+    with patch("subprocess.run", return_value=_completed(returncode=1, stderr="unauthorized")):
+        login_calls = []
+        with pytest.raises(compose.DeployError):
+            compose.up(Path("c.yaml"), Path(".env"), "proj", Path("."), pull=True, timeout=30,
+                        retry_login=lambda: login_calls.append(1))
+    assert login_calls == [1]
+
+
+def test_up_without_retry_login_callback_raises_immediately_on_auth_failure():
+    with patch("subprocess.run", return_value=_completed(returncode=1, stderr="unauthorized")) as mock_run:
+        with pytest.raises(compose.DeployError):
+            compose.up(Path("c.yaml"), Path(".env"), "proj", Path("."), pull=True, timeout=30)
+    calls = [c.args[0] for c in mock_run.call_args_list]
+    assert sum(1 for c in calls if "pull" in c) == 1

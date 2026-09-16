@@ -3,8 +3,17 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
+from typing import Callable
 
 log = logging.getLogger("docker_operator.compose")
+
+# Stderr substrings meaning the registry rejected/couldn't serve the pull rather than the image not existing: a fresh `docker login` can resolve these
+_AUTH_ERROR_MARKERS = ("unauthorized", "authentication required", "access denied", "404 page not found")
+
+
+def _looks_like_auth_error(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _AUTH_ERROR_MARKERS)
 
 
 # Raised when a docker compose invocation fails or times out
@@ -47,10 +56,19 @@ def resolve_config(compose_file: Path, env_file: Path, project: str, project_dir
                 timeout, capture=True)
 
 
-def up(compose_file: Path, env_file: Path, project: str, project_dir: Path, *, pull: bool, timeout: int) -> None:
+def up(compose_file: Path, env_file: Path, project: str, project_dir: Path, *, pull: bool, timeout: int,
+       retry_login: Callable[[], None] | None = None) -> None:
     base = _base_args(compose_file, env_file, project, project_dir)
     if pull:
-        _run(base + ["pull", "--quiet"], timeout)
+        try:
+            _run(base + ["pull", "--quiet"], timeout)
+        except DeployError as exc:
+            if retry_login is None or not _looks_like_auth_error(exc.stderr):
+                raise
+            log.warning("stack '%s' pull looked like a registry auth failure, retrying docker login and pull once",
+                        project)
+            retry_login()
+            _run(base + ["pull", "--quiet"], timeout)
     _run(base + ["up", "-d", "--remove-orphans"], timeout)
 
 

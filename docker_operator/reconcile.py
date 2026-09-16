@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from . import compose, secrets, state as state_mod
+from . import compose, registry, secrets, state as state_mod
 from .config import Settings
 from .gitops import sync_repo
 from .networks import parse_networks, priority_sorted, topo_order
@@ -174,7 +174,8 @@ def _promote_and_up(settings: Settings, name: str, deploy_path, staged_compose, 
     # If `up` fails, leave the canonical files and state hash untouched so the next reconcile retries cleanly from the same input
     try:
         compose.up(staged_compose, staged_env, name, deploy_path,
-                   pull=settings.pull_images, timeout=settings.deploy_timeout_seconds)
+                   pull=settings.pull_images, timeout=settings.deploy_timeout_seconds,
+                   retry_login=lambda: registry.login(settings))
     except Exception:
         staged_compose.unlink(missing_ok=True)
         staged_env.unlink(missing_ok=True)
