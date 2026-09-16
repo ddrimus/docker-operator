@@ -29,6 +29,11 @@ def _marker(container_name: str) -> str:
                            capture_output=True, text=True, check=True).stdout.strip()
 
 
+# Printed (not logged) so it shows up in pytest's own captured-output-on-failure, no LOG_LEVEL wiring needed to see it
+def _log(message: str) -> None:
+    print(f"[trial] {message}")
+
+
 def test_stack_actually_runs_via_real_docker(git_repo: Path, tmp_path: Path, real_docker_cleanup):
     # Reuse tmp_path's unique name so every real docker resource this test touches can't collide with a leftover from a previous run
     name = f"e2e-solo-{tmp_path.name}"
@@ -149,6 +154,7 @@ services:
 def test_realistic_user_session_covers_stop_start_pause_force_and_removal(git_repo: Path, tmp_path: Path,
                                                                             real_docker_cleanup):
     import shutil
+    from docker_operator import state as state_mod
     name = f"e2e-trial-{tmp_path.name}"
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), pull_images=False,
                               deploy_timeout_seconds=120, prune_removed_stacks=True)
@@ -164,60 +170,106 @@ services:
       MARKER: "{marker}"
 """
 
-    # Fresh deploy; registered for cleanup now, a no-op by the time this test tears the stack down itself at the end
+    _log("1/11 fresh deploy")
+    # Registered for cleanup now, a no-op by the time this test tears the stack down itself at the end
     add_stack(git_repo, name, compose=compose_with_marker("v1"))
     reconcile(settings)
     real_docker_cleanup(settings.deploy_dir / name, name)
     assert _is_running(name)
     assert _marker(name) == "v1"
+    _log("1/11 OK: running, MARKER=v1")
 
-    # A user manually stops it: the operator must never treat "not running" as something to fix on its own
+    _log("2/11 manual `docker stop`, then reconcile with no git change")
+    # The operator must never treat "not running" as something to fix on its own
     subprocess.run(["docker", "stop", name], check=True, capture_output=True)
     assert not _is_running(name)
     reconcile(settings)
     assert not _is_running(name)
+    _log("2/11 OK: left stopped")
 
-    # The user starts it back up by hand: plain docker commands work normally against an operator-deployed stack
+    _log("3/11 manual `docker start`")
+    # Plain docker commands work normally against an operator-deployed stack
     subprocess.run(["docker", "start", name], check=True, capture_output=True)
     assert _is_running(name)
+    _log("3/11 OK: running again")
 
-    # A real content change in git gets picked up on the next reconcile, recreating the container
+    _log("4/11 manual `docker restart`, then reconcile with no git change")
+    # Same container the whole time: restart isn't a recreate, and the operator still has no reason to touch it
+    id_before_restart = _container_id(name)
+    subprocess.run(["docker", "restart", name], check=True, capture_output=True)
+    assert _is_running(name)
+    assert _container_id(name) == id_before_restart
+    reconcile(settings)
+    assert _container_id(name) == id_before_restart
+    _log("4/11 OK: same container throughout")
+
+    _log("5/11 real content change in git")
     id_before_change = _container_id(name)
     add_stack(git_repo, name, compose=compose_with_marker("v2"))
     reconcile(settings)
     assert _marker(name) == "v2"
     assert _container_id(name) != id_before_change
+    _log("5/11 OK: picked up, container recreated, MARKER=v2")
 
-    # Pausing freezes the stack even while its tracked files keep changing underneath it
+    _log("6/11 pause, then change again in the same commit")
     add_stack(git_repo, name, compose=compose_with_marker("v3"), commit=False)
     (git_repo / "compose" / name / ".paused").write_text("")
     subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "pause and change"], cwd=git_repo, check=True, capture_output=True)
     reconcile(settings)
     assert _marker(name) == "v2"
+    _log("6/11 OK: frozen at MARKER=v2 while paused")
 
-    # Unpausing picks up everything that accumulated while paused, in one go
+    _log("7/11 unpause")
     (git_repo / "compose" / name / ".paused").unlink()
     subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "unpause"], cwd=git_repo, check=True, capture_output=True)
     reconcile(settings)
     assert _marker(name) == "v3"
+    _log("7/11 OK: accumulated change applied, MARKER=v3")
 
-    # A manual teardown (e.g. `docker compose down -v --rmi all`) leaves nothing for the operator to notice on its own
+    _log("8/11 manual teardown, then --force to recover")
+    # A manual `docker compose down -v --rmi all` leaves nothing for the operator to notice on its own
     subprocess.run(["docker", "rm", "-f", name], check=True, capture_output=True)
     assert not _is_running(name)
     reconcile(settings)
     assert not _is_running(name)
-
-    # --force bypasses that and redeploys the unchanged content from git anyway, exactly the documented recovery path
     reconcile(settings, force={name})
     assert _is_running(name)
     assert _marker(name) == "v3"
+    _log("8/11 OK: stayed gone until forced, then came back")
 
-    # Removing the stack from the repo actually tears it down and cleans up its deploy directory
+    _log("9/11 a broken image reference fails at deploy, not silently")
+    # pull_policy: never keeps this failure local and deterministic; no network/registry flakiness in CI
+    add_stack(git_repo, name, compose=f"""\
+services:
+  {name}:
+    image: alpine:e2e-trial-tag-does-not-exist
+    pull_policy: never
+    container_name: {name}
+    command: ["sleep", "3600"]
+    environment:
+      MARKER: "v4"
+""")
+    reconcile(settings)
+    st = state_mod.load(settings.state_file)
+    assert st["retries"][name]["attempts"] == 1
+    _log("9/11 OK: deploy failed as expected, retry recorded")
+
+    _log("10/11 fixing the image and reconciling recovers it")
+    add_stack(git_repo, name, compose=compose_with_marker("v4"))
+    reconcile(settings)
+    assert _is_running(name)
+    assert _marker(name) == "v4"
+    st = state_mod.load(settings.state_file)
+    assert name not in st.get("retries", {})
+    _log("10/11 OK: fixed image deployed, retry state cleared")
+
+    _log("11/11 removing the stack from the repo entirely")
     shutil.rmtree(git_repo / "compose" / name)
     subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "remove stack"], cwd=git_repo, check=True, capture_output=True)
     reconcile(settings)
     assert not _is_running(name)
     assert not (settings.deploy_dir / name).exists()
+    _log("11/11 OK: torn down and cleaned up")
