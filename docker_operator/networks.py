@@ -35,11 +35,15 @@ def parse_networks(config_json: str) -> tuple[set[str], set[str]]:
 # Move priority names to the front, keeping relative order otherwise, so topo_order's tie-break prefers them without ever overriding a real dependency
 def priority_sorted(names: list[str], priority: tuple[str, ...]) -> list[str]:
     rank = {name: i for i, name in enumerate(priority)}
-    return sorted(names, key=lambda n: (rank.get(n, len(priority)), names.index(n)))
+    # Precomputed once instead of names.index(n) per key; that would be an O(n) scan per element, O(n^2) overall for no reason
+    order = {name: i for i, name in enumerate(names)}
+    return sorted(names, key=lambda n: (rank.get(n, len(priority)), order[n]))
 
 
 # Order stacks via Kahn's algorithm, falling back to the given order on a dependency cycle
 def topo_order(names: list[str], depends_on: dict[str, set[str]]) -> list[str]:
+    # Same reasoning as priority_sorted: a precomputed position beats names.index(n) inside the loop below
+    order = {name: i for i, name in enumerate(names)}
     remaining = {n: set(depends_on.get(n, ())) & set(names) for n in names}
     ordered: list[str] = []
     pending = list(names)
@@ -49,7 +53,7 @@ def topo_order(names: list[str], depends_on: dict[str, set[str]]) -> list[str]:
             log.warning("stack dependency cycle detected among %s, using original order", pending)
             ordered.extend(pending)
             break
-        ready.sort(key=names.index)
+        ready.sort(key=order.__getitem__)
         for n in ready:
             ordered.append(n)
             pending.remove(n)

@@ -78,3 +78,43 @@ def test_timeout_with_no_stderr_captured_does_not_crash():
         with pytest.raises(compose.DeployError) as exc_info:
             compose.up(Path("c.yaml"), Path(".env"), "proj", Path("."), pull=False, timeout=30)
     assert exc_info.value.stderr == ""
+
+
+def test_service_names_returns_keys_in_config_order():
+    config_json = '{"services": {"web": {}, "db": {}, "worker": {}}}'
+    assert compose.service_names(config_json) == ["web", "db", "worker"]
+
+
+def test_service_names_empty_on_malformed_json():
+    assert compose.service_names("not json") == []
+
+
+def test_service_names_empty_when_services_key_missing():
+    assert compose.service_names('{"networks": {}}') == []
+
+
+def test_ps_parses_one_json_object_per_line():
+    out = '{"Service": "web", "State": "running"}\n{"Service": "db", "State": "exited"}\n'
+    with patch("subprocess.run", return_value=_completed(stdout=out)):
+        rows = compose.ps(Path("c.yaml"), Path(".env"), "proj", Path("."), timeout=30)
+    assert rows == {"web": {"Service": "web", "State": "running"},
+                     "db": {"Service": "db", "State": "exited"}}
+
+
+def test_ps_parses_a_single_json_array():
+    out = '[{"Service": "web", "State": "running"}, {"Service": "db", "State": "exited"}]'
+    with patch("subprocess.run", return_value=_completed(stdout=out)):
+        rows = compose.ps(Path("c.yaml"), Path(".env"), "proj", Path("."), timeout=30)
+    assert set(rows) == {"web", "db"}
+
+
+def test_ps_returns_empty_dict_when_nothing_was_ever_created():
+    with patch("subprocess.run", return_value=_completed(stdout="")):
+        assert compose.ps(Path("c.yaml"), Path(".env"), "proj", Path("."), timeout=30) == {}
+
+
+def test_ps_skips_blank_and_malformed_lines_in_ndjson_output():
+    out = '{"Service": "web", "State": "running"}\n\nnot json\n'
+    with patch("subprocess.run", return_value=_completed(stdout=out)):
+        rows = compose.ps(Path("c.yaml"), Path(".env"), "proj", Path("."), timeout=30)
+    assert set(rows) == {"web"}
