@@ -462,10 +462,10 @@ def test_retry_notification_only_says_giving_up_on_the_final_attempt(git_repo, t
     second_title, second_description, second_color = notified[1]
     assert "attempt 1/2" in first_description and "giving up" not in first_description
     assert first_color == COLOR_WARNING
-    assert "Warnings" in first_title and "Errors" not in first_title
+    assert "Retrying" in first_title and "Failed" not in first_title
     assert "giving up" in second_description
     assert second_color == COLOR_ERROR
-    assert "Errors" in second_title
+    assert "Failed" in second_title
 
 
 def test_retry_budget_resets_once_the_stack_content_changes(git_repo, tmp_path):
@@ -542,6 +542,170 @@ def test_successful_deploy_clears_prior_retry_state(git_repo, tmp_path, deployed
     assert "flaky" in st["stacks"]
 
 
+# --- per-container status in outcome notifications ---
+
+def test_success_notification_includes_container_diff_block(git_repo, tmp_path, notified):
+    add_stack(git_repo, "web")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"web": {}}})
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "(1/1 containers)" in description
+    assert "```diff" in description
+    assert "+ web" in description
+    assert "📦 Result: `1/1 containers started`" in description
+    assert color == COLOR_SUCCESS
+
+
+def test_deploy_failure_diff_marks_only_the_failed_container(git_repo, tmp_path, notified):
+    add_stack(git_repo, "app", compose="services:\n  web:\n    image: alpine:3.20\n  worker:\n    image: alpine:3.20\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=3, deploy_retry_delay_seconds=10,
+                              notify_webhook_url="https://discord.example.com/webhook")
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"web": {}, "worker": {}}})
+
+    def fake_ps(compose_file, env_file, project, project_dir, timeout):
+        return {"web": {"Service": "web", "State": "running"},
+                "worker": {"Service": "worker", "State": "exited"}}
+
+    from docker_operator.compose import DeployError
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=DeployError("failed", stderr="boom")), \
+         patch("docker_operator.compose.ps", side_effect=fake_ps):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "+ web" in description
+    assert "- worker (retry 1/3, 10s)" in description
+    assert "📦 Result: `1/2 containers started, 1 retrying`" in description
+    assert color == COLOR_WARNING
+    assert "Retrying" in title
+
+
+def test_deploy_failure_diff_shows_hard_error_after_giving_up(git_repo, tmp_path, notified):
+    add_stack(git_repo, "app")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=1, deploy_retry_delay_seconds=0,
+                              notify_webhook_url="https://discord.example.com/webhook")
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"app": {}}})
+
+    def fake_ps(compose_file, env_file, project, project_dir, timeout):
+        return {"app": {"Service": "app", "State": "exited"}}
+
+    from docker_operator.compose import DeployError
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=DeployError("failed", stderr="boom")), \
+         patch("docker_operator.compose.ps", side_effect=fake_ps):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "- app (hard error)" in description
+    assert "aborted" in description
+    assert "📦 Result: `0/1 containers started, 1 failed`" in description
+    assert color == COLOR_ERROR
+    assert "Failed" in title
+
+
+def test_deploy_failure_diff_does_not_flag_a_one_shot_job_that_exited_zero(git_repo, tmp_path, notified):
+    # "migrate" is a restart:"no" one-shot job that's supposed to run once and exit 0: it must read as "+" even though the stack as a whole failed
+    add_stack(git_repo, "app", compose="services:\n  migrate:\n    image: alpine:3.20\n  web:\n    image: alpine:3.20\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=3, deploy_retry_delay_seconds=10,
+                              notify_webhook_url="https://discord.example.com/webhook")
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"migrate": {}, "web": {}}})
+
+    def fake_ps(compose_file, env_file, project, project_dir, timeout):
+        return {"migrate": {"Service": "migrate", "State": "exited", "ExitCode": 0},
+                "web": {"Service": "web", "State": "exited", "ExitCode": 1}}
+
+    from docker_operator.compose import DeployError
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=DeployError("failed", stderr="boom")), \
+         patch("docker_operator.compose.ps", side_effect=fake_ps):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    description = notified[0][1]
+    assert "+ migrate" in description
+    assert "- web (retry 1/3, 10s)" in description
+    assert "📦 Result: `1/2 containers started, 1 retrying`" in description
+
+
+def test_result_line_falls_back_to_a_stack_count_with_no_containers_involved(git_repo, tmp_path, notified):
+    # A validate-stage failure never reaches `docker compose up`, so there's no container count to show: "0/0 containers started" would be meaningless
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    description = notified[0][1]
+    assert "📦 Result: `1 warning(s)`" in description
+    assert "containers started" not in description
+
+
+def test_container_status_lookup_failure_is_swallowed_not_raised(git_repo, tmp_path, notified):
+    add_stack(git_repo, "app")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo),
+                              notify_webhook_url="https://discord.example.com/webhook")
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"app": {}}})
+
+    from docker_operator.compose import DeployError
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=DeployError("failed", stderr="boom")), \
+         patch("docker_operator.compose.ps", side_effect=RuntimeError("docker not found")):
+        # Must not raise even though gathering container status itself failed
+        reconcile(settings)
+
+    assert len(notified) == 1
+    assert "- app" in notified[0][1]
+
+
+def test_container_status_not_queried_without_a_webhook_configured(git_repo, tmp_path, notified):
+    # No notify_webhook_url: nothing will ever read the container snapshot, so the extra `ps` subprocess call must not happen
+    add_stack(git_repo, "app")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), notify_webhook_url=None)
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"app": {}}})
+
+    from docker_operator.compose import DeployError
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=DeployError("failed", stderr="boom")), \
+         patch("docker_operator.compose.ps") as mock_ps:
+        reconcile(settings)
+
+    mock_ps.assert_not_called()
+
+
+def test_validate_failure_has_no_container_diff_block(git_repo, tmp_path, notified):
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "```diff" not in description
+    assert "> `invalid compose file`" in description
+
+
 # --- recovered notification ---
 
 def test_recovered_notification_sent_after_a_prior_failure(git_repo, tmp_path, deployed, notified):
@@ -569,11 +733,11 @@ def test_recap_notification_sent_even_on_full_success_but_without_recovered_word
     assert len(notified) == 1
     title, description, color = notified[0]
     assert "recovered" not in description
-    assert "deployed OK" in description
+    assert "deployed successfully" in description
     assert color == COLOR_SUCCESS
 
 
-def test_recap_is_one_notification_covering_every_stack_this_pass(git_repo, tmp_path, notified):
+def test_recap_splits_into_one_notification_per_status_bucket(git_repo, tmp_path, notified):
     add_stack(git_repo, "good")
     add_stack(git_repo, "bad")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
@@ -587,40 +751,37 @@ def test_recap_is_one_notification_covering_every_stack_this_pass(git_repo, tmp_
          patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
         reconcile(settings)
 
-    # One notification for the whole pass, not one per stack
-    assert len(notified) == 1
-    title, description, color = notified[0]
-    assert "good" in description
-    assert "bad" in description
-    assert "invalid compose file" in description
-    assert color == COLOR_WARNING
-    # A stack with retries left is a warning, not an error; the title must not overstate it
-    assert "Warnings" in title
-    assert "Errors" not in title
+    # One notification per non-empty bucket this pass, not one mixed recap and not one per stack
+    assert len(notified) == 2
+    by_title = {title: (description, color) for title, description, color in notified}
+    success_description, success_color = next(v for k, v in by_title.items() if "Success" in k)
+    warn_description, warn_color = next(v for k, v in by_title.items() if "Retrying" in k)
+    assert "good" in success_description
+    assert success_color == COLOR_SUCCESS
+    assert "bad" in warn_description
+    assert "invalid compose file" in warn_description
+    assert warn_color == COLOR_WARNING
 
 
-def test_recap_truncates_and_prioritizes_failures_when_many_stacks_at_once(git_repo, tmp_path, notified):
+def test_recap_truncates_a_bucket_with_more_than_15_stacks(git_repo, tmp_path, notified):
     for i in range(20):
         add_stack(git_repo, f"stack{i:02d}")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
-    failing = {"stack00", "stack01", "stack02"}
 
     def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
-        if project in failing:
-            raise RuntimeError(f"boom for {project}")
-        return _no_networks_json()
+        return json.dumps({"networks": {}, "services": {project: {}}})
 
     with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
          patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
         reconcile(settings)
 
+    # A single "ok" bucket notification, its body capped rather than growing unbounded
     assert len(notified) == 1
     title, description, color = notified[0]
-    # All 3 failures survive truncation even though 17 successful stacks would otherwise crowd them out
-    for name in failing:
-        assert name in description
+    assert "Success" in title
+    assert color == COLOR_SUCCESS
     assert "more, see logs" in description
-    assert color == COLOR_WARNING
+    assert "📦 Result: `20/20 containers started`" in description
 
 
 def test_no_notification_on_a_pass_with_no_changes(git_repo, tmp_path, deployed, notified):

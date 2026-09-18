@@ -1,5 +1,6 @@
 # Wraps `docker compose` invocations with logging and structured errors
 from __future__ import annotations
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -54,6 +55,39 @@ def _base_args(compose_file: Path, env_file: Path, project: str, project_dir: Pa
 def resolve_config(compose_file: Path, env_file: Path, project: str, project_dir: Path, timeout: int) -> str:
     return _run(_base_args(compose_file, env_file, project, project_dir) + ["config", "--format", "json"],
                 timeout, capture=True)
+
+
+# Service names a `docker compose config --format json` result defines, in compose-file order, for per-container status reporting
+def service_names(config_json: str) -> list[str]:
+    try:
+        data = json.loads(config_json)
+    except json.JSONDecodeError:
+        return []
+    services = data.get("services") if isinstance(data, dict) else None
+    return list(services) if isinstance(services, dict) else []
+
+
+# Per-service `docker compose ps` rows for a project, keyed by service name; best-effort, used for per-container status in notifications
+def ps(compose_file: Path, env_file: Path, project: str, project_dir: Path, timeout: int) -> dict[str, dict]:
+    out = _run(_base_args(compose_file, env_file, project, project_dir) + ["ps", "-a", "--format", "json"],
+                timeout, capture=True).strip()
+    if not out:
+        return {}
+    # Compose versions differ: some print a single JSON array, others one JSON object per line
+    try:
+        parsed = json.loads(out)
+        rows = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        rows = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return {row["Service"]: row for row in rows if isinstance(row, dict) and row.get("Service")}
 
 
 def up(compose_file: Path, env_file: Path, project: str, project_dir: Path, *, pull: bool, timeout: int,
