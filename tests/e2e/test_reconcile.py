@@ -1,6 +1,7 @@
 from __future__ import annotations
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -148,6 +149,32 @@ services:
     reconcile(settings)
 
     assert not _is_running(name)
+
+
+def test_broken_deploy_reports_real_per_container_status(git_repo: Path, tmp_path: Path, real_docker_cleanup):
+    # compose.ps() only runs when notify_webhook_url is set, so the realistic-session test's broken-image step (below) never actually exercises it --
+    # this is the one test in the suite that does, against a real docker daemon instead of the mocked `ps` used everywhere else
+    name = f"e2e-ps-{tmp_path.name}"
+    add_stack(git_repo, name, compose=f"""\
+services:
+  {name}:
+    image: alpine:e2e-ps-tag-does-not-exist
+    pull_policy: never
+    container_name: {name}
+    command: ["sleep", "3600"]
+""")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), pull_images=False, deploy_timeout_seconds=120,
+                              deploy_max_retries=1, deploy_retry_delay_seconds=0,
+                              notify_webhook_url="https://discord.example.com/webhook")
+    real_docker_cleanup(settings.deploy_dir / name, name)
+
+    calls = []
+    with patch("docker_operator.reconcile.notify", side_effect=lambda *a: calls.append(a)):
+        reconcile(settings)
+
+    assert len(calls) == 1
+    _, _, description, _ = calls[0]
+    assert f"- {name} (hard error)" in description
 
 
 # One realistic homelab session end to end: everything a user could do to a running stack by hand, in order
