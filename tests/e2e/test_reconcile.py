@@ -174,7 +174,8 @@ services:
 
     assert len(calls) == 1
     _, _, description, _ = calls[0]
-    assert f"❌ {name} (hard error)" in description
+    # The image never existed, so compose never created the container: a real `ps` snapshot has no row for it
+    assert f"⛔ {name}: `not started`" in description
 
 
 # One realistic homelab session end to end: everything a user could do to a running stack by hand, in order

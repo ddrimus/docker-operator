@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -20,13 +21,7 @@ from .util import chown_recursive, exc_detail, redact
 
 log = logging.getLogger("docker_operator.reconcile")
 
-# Outcomes accumulate as (status, block, total_containers, started_containers) through a pass: counts are 0/0 when there's no container yet (validate failure, removal)
-Outcome = tuple[str, str, int, int]
-
-# Keeps a many-stacks-at-once bucket notification comfortably under the message size limit of most notification services
-_MAX_RECAP_STACKS = 15
-
-# `ps` is a quick read-only listing, not a real deploy; cap its wait well below deploy_timeout_seconds so a stuck daemon can't double the hang time
+# Shared timeout for quick read-only lookups done purely for notification detail (container status `ps`, a removed stack's service list), never a real deploy, so it stays well below deploy_timeout_seconds and can't double the hang time if the daemon is stuck
 _STATUS_TIMEOUT_SECONDS = 15
 
 # Named once here instead of scattered as raw glyphs through the f-strings below; one place to change an icon, and a name search actually finds every use
@@ -34,9 +29,8 @@ _ICON_APP = "🐙"       # every notification title, regardless of status; the n
 _ICON_RESULT = "📦"
 _ICON_DURATION = "⏳"
 _ICON_TIME = "🕒"
-_ICON_REPO = "🔗"      # git-unreachable's own alert only
 
-# Title/type for each bucket's own standalone notification
+# Title/type for every notification, keyed by status: every notification uses one of these three, no exceptions; git-unreachable is just another "error" (same title/type as any other hard failure)
 _BUCKET_STYLE = {
     "error": (f"{_ICON_APP} Docker Operator - Failed", TYPE_ERROR),
     "warn": (f"{_ICON_APP} Docker Operator - Retrying", TYPE_WARNING),
@@ -44,14 +38,14 @@ _BUCKET_STYLE = {
 }
 
 
-# The bucket's Result line: containers started vs total, plus what's wrong with the rest; falls back to a stack count when total is 0 (nothing in the bucket ever reached a container)
-def _result_summary(status: str, started: int, total: int, stack_count: int) -> str:
-    if total == 0:
-        label = {"ok": "succeeded", "warn": "warning(s)", "error": "hard error(s)"}[status]
-        return f"{stack_count} {label}"
-    if status == "ok":
-        return f"{started}/{total} containers started"
-    return f"{started}/{total} containers started, {total - started} {'retrying' if status == 'warn' else 'failed'}"
+# Send this one stack's own notification right away: no batching, no waiting for the rest of the pass to finish; every caller passes a Result line, no exceptions
+def _send_stack_notify(settings: Settings, status: str, body: str, duration: float, result: str) -> None:
+    title, notify_type = _BUCKET_STYLE[status]
+    extra = (f"{_ICON_RESULT} Result: `{result}`\n"
+             f"{_ICON_DURATION} Duration: `{duration:.1f}s`\n"
+             f"{_ICON_TIME} Time: `{_timestamp()}`")
+    description = f"{body}\n\n**Details**\n{extra}"
+    notify(settings.notify_urls, title, description, notify_type)
 
 
 # True if this attempt at new_hash should run now: never attempted, past the backoff delay, or a different hash than what was last failing (a real change resets it)
@@ -100,82 +94,133 @@ def _row_ok(row: dict | None) -> bool:
     return state == "running" or (state == "exited" and row.get("ExitCode") == 0)
 
 
-# One line per service: "✅ name" when running, "❌ name (note)" for every other service in `failed`, readable as is on any service, even plain-text ones
-def _status_lines(services: list[str], failed: dict[str, str]) -> str:
-    lines = [f"❌ {svc} ({failed[svc]})" if svc in failed else f"✅ {svc}" for svc in services]
-    return "\n".join(lines)
+# Lowercase state of a `docker compose ps` row, e.g. "running" or "exited (1)"; "not started" when compose never created that container
+def _row_state(row: dict | None) -> str:
+    if not row:
+        return "not started"
+    state = (row.get("State") or "unknown").lower()
+    code = row.get("ExitCode")
+    return f"{state} ({code})" if state == "exited" and code is not None else state
+
+
+# Body shared by every notification: intro sentence, then one "✅ name: `state`" or "⛔ name: `state`" line per entry under a bold heading, the same shape as the Details block below it; plain emoji and inline code read fine on any service, even plain-text ones
+def _stack_body(intro: str, entries: list[tuple[str, bool, str]], heading: str = "Containers") -> str:
+    lines = [f"{'✅' if ok else '⛔'} {name}: `{state}`" for name, ok, state in entries]
+    return f"{intro}\n\n**{heading}**\n" + "\n".join(lines)
+
+
+# Send one removed-stack notification, same standard shape as every other notification; called only after the caller's own state change (forget/teardown) already happened, so a bug here can never be mistaken for that having failed
+def _notify_removed(settings: Settings, name: str, status: str, verb: str, duration: float,
+                     services: list[str] | None = None) -> None:
+    try:
+        # Falls back to the stack's own name as a single pseudo-service when the real list couldn't be resolved (already gone on disk, or resolve_config itself failed)
+        items = services or [name]
+        # A `down` failure doesn't say which container blocked it, unlike a deploy failure's real per-container snapshot, so every service is marked the same
+        ok = status != "error"
+        entries = [(svc, ok, "removed" if ok else "teardown error") for svc in items]
+        result = (f"{len(items)}/{len(items)} containers removed" if ok
+                  else f"0/{len(items)} containers removed, {len(items)} failed")
+        _send_stack_notify(settings, status, _stack_body(f"Stack **{name}** {verb}", entries), duration, result)
+    except Exception:
+        log.exception("failed to send removal notification for stack '%s'", name)
 
 
 # Sync the repo, logging (and optionally notifying) on total failure; returns False if the caller should bail
 def _sync_or_bail(settings: Settings, action: str, notify_on_failure: bool) -> bool:
+    start = time.time()
     try:
         head, synced = sync_repo(settings.git_repo_url, settings.git_branch, settings.repo_dir)
     except Exception as exc:
         detail = exc_detail(exc)
         log.error("cannot reach %s and no previous checkout exists yet: %s", redact(settings.git_repo_url), detail)
         if notify_on_failure:
-            notify(settings.notify_urls, f"{_ICON_APP} Docker Operator - Git Unreachable",
-                   f"An alert for **the repository** has failed to sync, and no cached checkout exists to fall back on:\n"
-                   f"> `{detail}`\n\n"
-                   f"\n**Details**\n"
-                   f"{_ICON_REPO} Repo: `{redact(settings.git_repo_url)}`\n"
-                   f"{_ICON_TIME} Time: `{_timestamp()}`",
-                   TYPE_ERROR)
+            try:
+                body = _stack_body("The repository could not be synced, and no cached checkout exists to fall back on.",
+                                   [(redact(settings.git_repo_url), False, "unreachable")], heading="Repository")
+                _send_stack_notify(settings, "error", body, time.time() - start, "n/a")
+            except Exception:
+                log.exception("failed to send git-unreachable notification")
         return False
     if not synced:
         log.info("git server unreachable, %s against last known-good checkout (%s)", action, head[:12])
     return True
 
 
-# Record a validate/deploy failure for one stack. Final give-ups read as errors, still-within-budget reads as a warning, and no `services` (never reached a container) falls back to plain-detail wording
+# A bare "name:" key, used to match service names once we're at the right indent under a "services:" block; indentation itself is measured separately since compose files aren't all 2-space
+_SERVICE_KEY_RE = re.compile(r"^([A-Za-z0-9][\w.-]*):")
+
+
+# Best-effort scan for a compose file's service names without actually parsing it (the real parser is exactly what just failed); returns [] on anything unexpected (missing file, binary/undecodable content, no services: block found): display-only, never used to decide what to deploy, and must never raise
+def _guess_service_names(compose_file: Path) -> list[str]:
+    try:
+        lines = compose_file.read_text().splitlines()
+    except Exception:
+        return []
+    names: list[str] = []
+    indent = None
+    in_services = False
+    for line in lines:
+        if line.startswith("services:"):
+            in_services = True
+            continue
+        if not in_services or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            break
+        stripped = line.lstrip(" ")
+        this_indent = len(line) - len(stripped)
+        indent = this_indent if indent is None else indent
+        if this_indent != indent:
+            continue
+        m = _SERVICE_KEY_RE.match(stripped)
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+# Record a validate/deploy failure for one stack, always persisted before anything notification-related runs: a bug in the notification body below must never cost us the retry-state update itself
 def _fail_stack(settings: Settings, st: dict, retries: dict, name: str, new_hash: str, stage: str, exc: Exception,
-                 outcomes: list[Outcome], services: list[str] | None = None) -> None:
+                 duration: float, services: list[str] | None = None) -> None:
     detail = exc_detail(exc)
     attempts = _record_failure(settings, st, retries, name, new_hash)
     gave_up = attempts >= settings.deploy_max_retries
     log.error("stack '%s' failed to %s: %s (attempt %d/%d%s)", name, stage, detail, attempts,
               settings.deploy_max_retries, ", giving up until it changes" if gave_up else "")
+    try:
+        _notify_stack_failure(settings, name, stage, exc, attempts, gave_up, duration, services)
+    except Exception:
+        log.exception("failed to build/send failure notification for stack '%s': retry state was still recorded above", name)
 
-    if not services:
-        if gave_up:
-            outcomes.append(("error", f"Stack **{name}** failed to {stage} after {attempts} attempt(s), "
-                                       f"giving up until it changes:\n> `{detail}`", 0, 0))
-        else:
-            outcomes.append(("warn", f"Stack **{name}** failed to {stage} "
-                                      f"(attempt {attempts}/{settings.deploy_max_retries}):\n> `{detail}`", 0, 0))
-        return
 
-    rows = getattr(exc, "containers", None) or {}
-    if gave_up:
-        note, intro, status = "hard error", f"Stack **{name}** failed to start and the deploy was aborted.", "error"
+# Builds and sends the notification for a failure `_fail_stack` already recorded, always the same shape (intro sentence, Containers, Details). Only intro/status and the container states differ per kind; validate is always a hard error (a git fix, not a wait, is what clears it), deploy still graduates warn -> error as its retry budget runs out
+def _notify_stack_failure(settings: Settings, name: str, stage: str, exc: Exception, attempts: int, gave_up: bool,
+                           duration: float, services: list[str] | None) -> None:
+    # Falls back to the stack's own name as a single pseudo-service when there's no real service list, keeping every failure notification on the same Containers shape
+    items = services or [name]
+    # None when `ps` was skipped or failed: every state is then unknown, a missing row in a real snapshot means compose never created that container
+    rows = getattr(exc, "containers", None)
+
+    if stage == "validate":
+        status = "error"
+        intro = f"Stack **{name}** failed to validate and the deploy was aborted."
+        entries = [(svc, False, "invalid compose file") for svc in items]
     else:
-        note = f"retry {attempts}/{settings.deploy_max_retries}, {settings.deploy_retry_delay_seconds}s"
-        intro, status = f"Stack **{name}** hit issues during deploy, retrying automatically.", "warn"
-    failed = {svc: note for svc in services if not _row_ok(rows.get(svc))}
-    outcomes.append((status, f"{intro}\n\n{_status_lines(services, failed)}", len(services), len(services) - len(failed)))
+        if gave_up:
+            status = "error"
+            intro = f"Stack **{name}** failed to start and the deploy was aborted."
+        else:
+            status = "warn"
+            intro = (f"Stack **{name}** hit issues during deploy, retrying automatically "
+                     f"(attempt {attempts}/{settings.deploy_max_retries}, next in {settings.deploy_retry_delay_seconds}s).")
+        if services and rows is not None:
+            entries = [(svc, _row_ok(rows.get(svc)), _row_state(rows.get(svc))) for svc in items]
+        else:
+            entries = [(svc, False, "unknown") for svc in items]
 
-
-# Send up to one notification per non-empty status bucket this pass (error/warn/ok), instead of one mixed recap; skipped entirely for an empty bucket
-def _send_recap(settings: Settings, outcomes: list[Outcome], elapsed: float) -> None:
-    for status in ("error", "warn", "ok"):
-        entries = [o for o in outcomes if o[0] == status]
-        if not entries:
-            continue
-        title, notify_type = _BUCKET_STYLE[status]
-        blocks = [block for _, block, _, _ in entries]
-        total = sum(t for _, _, t, _ in entries)
-        started = sum(s for _, _, _, s in entries)
-
-        shown = blocks[:_MAX_RECAP_STACKS]
-        if len(blocks) > _MAX_RECAP_STACKS:
-            shown = shown + [f"… and {len(blocks) - _MAX_RECAP_STACKS} more, see logs for the full list"]
-        body = "\n\n".join(shown)
-        description = (f"{body}\n"
-                        f"\n**Details**\n"
-                        f"{_ICON_RESULT} Result: `{_result_summary(status, started, total, len(entries))}`\n"
-                        f"{_ICON_DURATION} Duration: `{elapsed:.1f}s`\n"
-                        f"{_ICON_TIME} Time: `{_timestamp()}`")
-        notify(settings.notify_urls, title, description, notify_type)
+    failed = sum(1 for _, ok, _ in entries if not ok)
+    result = f"{len(items) - failed}/{len(items)} containers started" + (
+        f", {failed} {'retrying' if status == 'warn' else 'failed'}" if failed else "")
+    _send_stack_notify(settings, status, _stack_body(intro, entries), duration, result)
 
 
 # Cross-process advisory lock so a manual `--once` run can't race the server's background worker thread
@@ -229,7 +274,8 @@ def _promote_and_up(settings: Settings, name: str, deploy_path, staged_compose, 
             try:
                 exc.containers = compose.ps(staged_compose, staged_env, name, deploy_path, _STATUS_TIMEOUT_SECONDS)
             except Exception:
-                exc.containers = {}
+                # None, not {}: "couldn't look" must read as an unknown state, never as "no container was started"
+                exc.containers = None
         staged_compose.unlink(missing_ok=True)
         staged_env.unlink(missing_ok=True)
         raise
@@ -291,19 +337,18 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
               f", {deferred} deferred" if deferred else "",
               f", {len(paused)} paused" if paused else "")
 
-    # Every notable per-stack outcome this pass, grouped into up to 3 bucket notifications at the very end instead of one per event
-    outcomes: list[Outcome] = []
-
     # Phase A: stage + validate every changed stack, discover network roles
     staged: dict[str, tuple] = {}
     owners: dict[str, str] = {}
     needs: dict[str, set[str]] = {}
     for stk, new_hash in changed:
         deploy_path = _deploy_path(settings, stk.name)
+        stage_start = time.time()
         try:
             staged_compose, staged_env, owned, external, services = _stage(settings, stk, deploy_path)
         except Exception as exc:
-            _fail_stack(settings, st, retries, stk.name, new_hash, "validate", exc, outcomes)
+            _fail_stack(settings, st, retries, stk.name, new_hash, "validate", exc, time.time() - stage_start,
+                        services=_guess_service_names(stk.compose_file))
             continue
         for n in owned:
             owners.setdefault(n, stk.name)
@@ -327,19 +372,28 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
             log.info("deploying stack '%s'", name)
             _promote_and_up(settings, name, deploy_path, staged_compose, staged_env)
             _remember_stack(settings, st, known, retries, name, new_hash)
-            log.info("stack '%s' deployed OK in %.1fs -> %s", name, time.time() - stack_start, deploy_path)
-            verb = "recovered and deployed successfully" if was_failing else "deployed successfully"
-            if services:
-                intro = f"Stack **{name}** {verb} ({len(services)}/{len(services)} containers)."
-                outcomes.append(("ok", f"{intro}\n\n{_status_lines(services, {})}", len(services), len(services)))
-            else:
-                outcomes.append(("ok", f"Stack **{name}** {verb}.", 0, 0))
         except Exception as exc:
-            _fail_stack(settings, st, retries, name, new_hash, "deploy", exc, outcomes, services=services)
+            _fail_stack(settings, st, retries, name, new_hash, "deploy", exc, time.time() - stack_start,
+                        services=services)
+            continue
+
+        # Deploy already succeeded and is already persisted above: nothing from here on may turn this into a reported failure
+        duration = time.time() - stack_start
+        log.info("stack '%s' deployed OK in %.1fs -> %s", name, duration, deploy_path)
+        try:
+            verb = "recovered and deployed successfully" if was_failing else "deployed successfully"
+            items = services or [name]
+            suffix = f" ({len(services)}/{len(services)} containers)" if services else ""
+            intro = f"Stack **{name}** {verb}{suffix}."
+            result = f"{len(items)}/{len(items)} containers started"
+            _send_stack_notify(settings, "ok", _stack_body(intro, [(svc, True, "running") for svc in items]), duration, result)
+        except Exception:
+            log.exception("failed to send success notification for stack '%s' (deploy itself succeeded)", name)
 
     if removed:
         if settings.prune_removed_stacks:
             for name in removed:
+                remove_start = time.time()
                 deploy_path = _deploy_path(settings, name)
                 compose_file = deploy_path / "compose.yaml"
                 env_file = deploy_path / ".env"
@@ -348,26 +402,40 @@ def _reconcile_locked(settings: Settings, force: set[str] | None) -> None:
                     log.warning("stack '%s' removed from repo, nothing on disk to tear down, dropping from state",
                                 name)
                     _forget_stack(settings, st, known, retries, name)
-                    outcomes.append(("ok", f"Stack **{name}** was already gone on disk, dropped from tracking.", 0, 0))
+                    _notify_removed(settings, name, "ok", "was already gone on disk, dropped from tracking.",
+                                     time.time() - remove_start)
                     continue
+                # Resolved while the compose file still exists, purely for the notification's Containers section; skipped with no NOTIFY_URLS configured, nothing would read it; done before timing teardown itself so this diagnostic lookup never inflates the reported Duration; capped at _STATUS_TIMEOUT_SECONDS like the `ps` snapshot, since it's the same class of quick read-only local lookup, not a real deploy
+                removed_services: list[str] = []
+                if settings.notify_urls:
+                    try:
+                        config_json = compose.resolve_config(compose_file, env_file, name, deploy_path,
+                                                              _STATUS_TIMEOUT_SECONDS)
+                        removed_services = compose.service_names(config_json)
+                    except Exception as exc:
+                        log.debug("could not resolve service list for removed stack '%s': %s", name, exc_detail(exc))
+
+                teardown_start = time.time()
                 try:
                     log.warning("stack '%s' removed from repo, tearing down", name)
                     compose.down(compose_file, env_file, name, deploy_path, settings.deploy_timeout_seconds)
                     _forget_stack(settings, st, known, retries, name)
                     shutil.rmtree(deploy_path, ignore_errors=True)
-                    outcomes.append(("ok", f"Stack **{name}** was removed from the repo and torn down.", 0, 0))
                 except Exception as exc:
                     detail = exc_detail(exc)
                     log.error("failed to tear down '%s': %s", name, detail)
-                    outcomes.append(("error", f"Stack **{name}** was removed from the repo but failed to tear down:\n"
-                                               f"> `{detail}`", 0, 0))
+                    _notify_removed(settings, name, "error", "was removed from the repo but failed to tear down.",
+                                     time.time() - teardown_start, services=removed_services)
+                    continue
+
+                # Teardown already succeeded and is already persisted above: nothing from here on may turn this into a reported failure
+                _notify_removed(settings, name, "ok", "was removed from the repo and torn down.",
+                                 time.time() - teardown_start, services=removed_services)
         else:
-            # Log-only, deliberately: nothing here is ever cleared from `known`, so unlike everything else in outcomes this would re-notify every single pass forever, not just once
+            # Log-only, deliberately: state is never cleared for these, so re-notifying would fire on every future pass, not just once
             log.warning("stack(s) removed from repo, PRUNE_REMOVED_STACKS=false, left on disk: %s", removed)
 
-    elapsed = time.time() - start
-    _send_recap(settings, outcomes, elapsed)
-    log.info("reconcile finished in %.1fs", elapsed)
+    log.info("reconcile finished in %.1fs", time.time() - start)
 
 
 # Render and validate one stack's compose config in an isolated scratch dir, touching nothing persistent
