@@ -8,6 +8,7 @@ import urllib.request
 from logging.handlers import RotatingFileHandler
 
 from .config import load_settings
+from .notify import flush as flush_notifications
 from .reconcile import reconcile, validate
 from .registry import login as registry_login
 from .server import run
@@ -71,6 +72,8 @@ def main() -> None:
 
     if args.once:
         reconcile(settings, force=set(args.force) or None)
+        # Notifications are sent off a background queue so they never block reconcile itself (see notify.flush), but this process exits right after and daemon threads die outright on interpreter exit, so anything still queued needs an explicit wait here or it would simply never go out; a one-shot run has no shutdown-grace-period deadline forcing a short wait, so it can afford longer than flush()'s own conservative default
+        flush_notifications(timeout=30)
     else:
         run(settings)
 

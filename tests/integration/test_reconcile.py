@@ -324,9 +324,14 @@ def test_unreachable_git_with_no_previous_checkout_notifies_and_returns_cleanly(
     assert deployed == []
     assert len(notified) == 1
     title, description, color = notified[0]
-    assert "Git Unreachable" in title
-    assert str(tmp_path / "no-such-repo") in description
+    # Same title/color as any other hard failure; git-unreachable is not its own bucket
+    assert "Failed" in title
     assert color == COLOR_ERROR
+    # The repo URL is the diff block's own item, not a generic "repository" placeholder repeated in the prose
+    assert f"- {tmp_path / 'no-such-repo'} (unreachable)" in description
+    assert "the repository" in description
+    # No containers were ever involved here, unlike every other notification kind: "n/a", not a fake count
+    assert "📦 Result: `n/a`" in description
 
 
 def test_reconcile_lock_is_released_after_call_allows_second_call(git_repo, tmp_path, deployed):
@@ -339,20 +344,24 @@ def test_reconcile_lock_is_released_after_call_allows_second_call(git_repo, tmp_
     assert True
 
 
-def test_deploy_failure_notification_includes_stderr_detail(git_repo, tmp_path, notified):
+def test_deploy_failure_stderr_detail_is_logged_not_put_in_the_notification(git_repo, tmp_path, notified, caplog):
+    # The raw docker/compose error goes to the logs for debugging; the Discord card stays short: service + note only
     add_stack(git_repo, "traefik")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
     from docker_operator.compose import DeployError
 
-    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
          patch("docker_operator.compose.up",
                side_effect=DeployError("command failed: ...", stderr="port 80 already allocated\n")):
         reconcile(settings)
 
     assert len(notified) == 1
     title, description, color = notified[0]
-    assert "port 80 already allocated" in description
+    assert "port 80 already allocated" not in description
+    assert "- traefik (retry 1/3, " in description
     assert color == COLOR_WARNING
+    assert any("port 80 already allocated" in r.message for r in caplog.records)
 
 
 def test_self_heals_after_remote_becomes_unreachable_then_recovers(git_repo, tmp_path, deployed):
@@ -376,13 +385,14 @@ def test_self_heals_after_remote_becomes_unreachable_then_recovers(git_repo, tmp
     assert deployed == [("up", "forgejo")]
 
 
-def test_teardown_skipped_when_nothing_promoted_to_disk_yet(git_repo, tmp_path, deployed):
+def test_teardown_skipped_when_nothing_promoted_to_disk_yet(git_repo, tmp_path, deployed, notified):
     # A stack tracked in state whose compose.yaml was never promoted (deleted out-of-band) must just stop being tracked, not attempt `compose down`
     import subprocess, shutil
     add_stack(git_repo, "ghost")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
     reconcile(settings)
     deployed.clear()
+    notified.clear()
 
     (settings.deploy_dir / "ghost" / "compose.yaml").unlink()
 
@@ -393,34 +403,139 @@ def test_teardown_skipped_when_nothing_promoted_to_disk_yet(git_repo, tmp_path, 
     reconcile(settings)
 
     assert ("down", "ghost") not in deployed
+    title, description, color = notified[-1]
+    assert "Success" in title and color == COLOR_SUCCESS
+    assert "+ ghost" in description
+    assert "📦 Result: `1/1 containers started`" in description
     st = state_mod.load(settings.state_file)
     assert "ghost" not in st["stacks"]
 
 
-def test_teardown_failure_notifies_and_keeps_state_for_retry(git_repo, tmp_path, notified):
+def test_successful_teardown_notification_follows_the_standard_shape(git_repo, tmp_path, deployed, notified):
     import subprocess, shutil
-    add_stack(git_repo, "temp")
-    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
+    add_stack(git_repo, "temp", compose="services:\n  web:\n    image: alpine:3.20\n  worker:\n    image: alpine:3.20\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True,
+                              notify_webhook_url="https://discord.example.com/webhook")
 
     with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
          patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
-        # First pass: "temp" deploys cleanly, its own recap is not what this test is about
+        reconcile(settings)
+    notified.clear()
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"web": {}, "worker": {}}})
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.down", side_effect=lambda *a, **k: None):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "Success" in title and color == COLOR_SUCCESS
+    assert "torn down" in description
+    # Real service list resolved from the compose file still on disk, not just the stack name; same detail level as a deploy notification
+    assert "+ web" in description
+    assert "+ worker" in description
+    assert "+ temp" not in description  # the stack name itself is not a service; only real services appear in the diff block
+    assert "📦 Result: `2/2 containers started`" in description
+
+
+def test_teardown_failure_notifies_and_keeps_state_for_retry(git_repo, tmp_path, notified, caplog):
+    import subprocess, shutil
+    add_stack(git_repo, "temp", compose="services:\n  web:\n    image: alpine:3.20\n  worker:\n    image: alpine:3.20\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True,
+                              notify_webhook_url="https://discord.example.com/webhook")
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
+        # First pass: "temp" deploys cleanly, its own notification is not what this test is about
         reconcile(settings)
 
     shutil.rmtree(git_repo / "compose" / "temp")
     subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
 
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        return json.dumps({"networks": {}, "services": {"web": {}, "worker": {}}})
+
     from docker_operator.compose import DeployError
-    with patch("docker_operator.compose.down", side_effect=DeployError("down failed", stderr="container busy\n")):
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.down", side_effect=DeployError("down failed", stderr="container busy\n")):
         reconcile(settings)
 
     title, description, color = notified[-1]
-    assert "container busy" in description
+    # Raw detail goes to the logs, same as every other failure kind; the Discord card stays on the standard shape
+    assert "container busy" not in description
+    # Every real service marked the same way: a `down` failure doesn't say which one blocked it
+    assert "- web (teardown error)" in description
+    assert "- worker (teardown error)" in description
+    assert "Failed" in title
     assert color == COLOR_ERROR
     st = state_mod.load(settings.state_file)
     # Kept for retry, not silently dropped
     assert "temp" in st["stacks"]
+
+
+def test_teardown_notification_falls_back_to_stack_name_when_resolve_fails(git_repo, tmp_path, deployed, notified):
+    # If the compose file can't be resolved anymore (e.g. secrets no longer decryptable), fall back to the pseudo-item rather than losing the notification
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True,
+                              notify_webhook_url="https://discord.example.com/webhook")
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
+        reconcile(settings)
+    notified.clear()
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("cannot decrypt secrets")), \
+         patch("docker_operator.compose.down", side_effect=lambda *a, **k: None):
+        # Must not raise, and must still notify about the stack itself
+        reconcile(settings)
+
+    assert len(notified) == 1
+    description = notified[0][1]
+    assert "+ temp" in description
+    assert "📦 Result: `1/1 containers started`" in description
+
+
+def test_removed_stack_service_lookup_uses_the_short_status_timeout_not_the_full_deploy_timeout(
+        git_repo, tmp_path, deployed, notified):
+    # This lookup is purely diagnostic (for the notification's diff block), same class of call as the `ps` snapshot --
+    # a stuck daemon must not be able to block the real teardown behind a 300s+ diagnostic wait
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True,
+                              deploy_timeout_seconds=300, notify_webhook_url="https://discord.example.com/webhook")
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
+        reconcile(settings)
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    seen_timeouts = []
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        seen_timeouts.append(timeout)
+        return _no_networks_json()
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.down", side_effect=lambda *a, **k: None):
+        reconcile(settings)
+
+    assert seen_timeouts == [15]
 
 
 # --- retry budget: DEPLOY_MAX_RETRIES / DEPLOY_RETRY_DELAY_SECONDS ---
@@ -450,22 +565,103 @@ def test_failing_stack_stops_being_attempted_once_retries_are_spent(git_repo, tm
 
 
 def test_retry_notification_only_says_giving_up_on_the_final_attempt(git_repo, tmp_path, notified):
+    # A deploy-stage failure (not validate): retrying can plausibly help here, so it still graduates warn -> error
     add_stack(git_repo, "bad")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=2, deploy_retry_delay_seconds=0)
 
-    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("boom")):
+    from docker_operator.compose import DeployError
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up", side_effect=DeployError("failed", stderr="boom")):
         reconcile(settings)
         reconcile(settings)
 
     assert len(notified) == 2
     first_title, first_description, first_color = notified[0]
     second_title, second_description, second_color = notified[1]
-    assert "attempt 1/2" in first_description and "giving up" not in first_description
+    assert "- bad (retry 1/2, 0s)" in first_description and "aborted" not in first_description
     assert first_color == COLOR_WARNING
     assert "Retrying" in first_title and "Failed" not in first_title
-    assert "giving up" in second_description
+    assert "- bad (hard error)" in second_description and "aborted" in second_description
     assert second_color == COLOR_ERROR
     assert "Failed" in second_title
+
+
+def test_validate_failure_is_always_a_hard_error_never_retrying(git_repo, tmp_path, notified):
+    # A bad compose file needs a git fix, not a wait; unlike a deploy failure, it must never show as "Retrying"
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=5, deploy_retry_delay_seconds=0)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    title, description, color = notified[0]
+    assert "Failed" in title and "Retrying" not in title
+    assert color == COLOR_ERROR
+    assert "attempt" not in description
+    assert "- bad (invalid compose error)" in description
+    assert "📦 Result: `0/1 containers started, 1 failed`" in description
+
+
+def test_validate_failure_lists_every_service_found_in_the_raw_compose_file(git_repo, tmp_path, notified):
+    # docker compose config itself failed, so there's no verified service list: fall back to reading the raw file
+    add_stack(git_repo, "bad", compose="services:\n  app:\n    image: alpine:3.20\n  worker:\n    image: alpine:3.20\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    description = notified[0][1]
+    assert "- app (invalid compose error)" in description
+    assert "- worker (invalid compose error)" in description
+    assert "📦 Result: `0/2 containers started, 2 failed`" in description
+
+
+def test_validate_failure_falls_back_to_the_stack_name_when_the_file_cant_be_scanned(git_repo, tmp_path, notified):
+    # Malformed enough that even the best-effort scan finds nothing under services: and we still notify, just about the stack itself
+    add_stack(git_repo, "bad", compose="not even yaml-shaped\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    description = notified[0][1]
+    assert "- bad (invalid compose error)" in description
+
+
+def test_validate_failure_service_scan_is_not_locked_to_2_space_indentation(git_repo, tmp_path, notified):
+    # The scan measures the actual indent under services: instead of assuming 2 spaces, so a 4-space compose file still lists real names
+    add_stack(git_repo, "bad",
+              compose="services:\n    app:\n        image: alpine:3.20\n    worker:\n        image: alpine:3.20\n")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        reconcile(settings)
+
+    assert len(notified) == 1
+    description = notified[0][1]
+    assert "- app (invalid compose error)" in description
+    assert "- worker (invalid compose error)" in description
+
+
+def test_validate_failure_scan_survives_undecodable_bytes_in_the_compose_file(git_repo, tmp_path, notified):
+    # A binary/non-UTF-8 compose file must degrade to the stack-name fallback, not crash the whole reconcile pass
+    import subprocess
+    add_stack(git_repo, "bad")
+    (git_repo / "compose" / "bad" / "compose.yaml").write_bytes(b"services:\n  \xff\xfe broken\n")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "corrupt compose file"], cwd=git_repo, check=True, capture_output=True)
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        # Must not raise
+        reconcile(settings)
+
+    assert len(notified) == 1
+    description = notified[0][1]
+    assert "- bad (invalid compose error)" in description
 
 
 def test_retry_budget_resets_once_the_stack_content_changes(git_repo, tmp_path):
@@ -643,20 +839,6 @@ def test_deploy_failure_diff_does_not_flag_a_one_shot_job_that_exited_zero(git_r
     assert "📦 Result: `1/2 containers started, 1 retrying`" in description
 
 
-def test_result_line_falls_back_to_a_stack_count_with_no_containers_involved(git_repo, tmp_path, notified):
-    # A validate-stage failure never reaches `docker compose up`, so there's no container count to show: "0/0 containers started" would be meaningless
-    add_stack(git_repo, "bad")
-    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
-
-    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
-        reconcile(settings)
-
-    assert len(notified) == 1
-    description = notified[0][1]
-    assert "📦 Result: `1 warning(s)`" in description
-    assert "containers started" not in description
-
-
 def test_container_status_lookup_failure_is_swallowed_not_raised(git_repo, tmp_path, notified):
     add_stack(git_repo, "app")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo),
@@ -693,17 +875,103 @@ def test_container_status_not_queried_without_a_webhook_configured(git_repo, tmp
     mock_ps.assert_not_called()
 
 
-def test_validate_failure_has_no_container_diff_block(git_repo, tmp_path, notified):
-    add_stack(git_repo, "bad")
-    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+# --- NOTIFY_WEBHOOK_URL unset must fully disable notifications: no real network call, ever; these patch the real urllib.request.urlopen (not docker_operator.reconcile.notify like the `notified` fixture does elsewhere) since notify()'s own "if not url: return" guard is what's under test, and also assert on caplog since the notification-isolation try/except would otherwise silently swallow a broken guard's crash and make assert_not_called() pass for the wrong reason ---
 
-    with patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+def _assert_no_swallowed_notify_errors(caplog) -> None:
+    assert not any("failed to send" in r.message or "failed to build" in r.message for r in caplog.records)
+
+
+def test_no_network_call_on_success_without_a_webhook_configured(git_repo, tmp_path, deployed, caplog):
+    add_stack(git_repo, "good")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), notify_webhook_url=None)
+
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("urllib.request.urlopen") as mock_urlopen:
         reconcile(settings)
 
-    assert len(notified) == 1
-    title, description, color = notified[0]
-    assert "```diff" not in description
-    assert "> `invalid compose file`" in description
+    mock_urlopen.assert_not_called()
+    _assert_no_swallowed_notify_errors(caplog)
+
+
+def test_no_network_call_on_deploy_failure_without_a_webhook_configured(git_repo, tmp_path, caplog):
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), notify_webhook_url=None,
+                              deploy_max_retries=1, deploy_retry_delay_seconds=0)
+
+    from docker_operator.compose import DeployError
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("urllib.request.urlopen") as mock_urlopen, \
+         patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up", side_effect=DeployError("failed", stderr="boom")):
+        # deploy_max_retries=1 means this single pass already hits the "gave up" hard-error path too
+        reconcile(settings)
+
+    mock_urlopen.assert_not_called()
+    _assert_no_swallowed_notify_errors(caplog)
+
+
+def test_no_network_call_on_validate_failure_without_a_webhook_configured(git_repo, tmp_path, caplog):
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), notify_webhook_url=None)
+
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("urllib.request.urlopen") as mock_urlopen, \
+         patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")):
+        reconcile(settings)
+
+    mock_urlopen.assert_not_called()
+    _assert_no_swallowed_notify_errors(caplog)
+
+
+def test_no_network_call_on_stack_removal_without_a_webhook_configured(git_repo, tmp_path, deployed, caplog):
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), notify_webhook_url=None,
+                              prune_removed_stacks=True)
+    reconcile(settings)
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("urllib.request.urlopen") as mock_urlopen:
+        reconcile(settings)
+
+    mock_urlopen.assert_not_called()
+    _assert_no_swallowed_notify_errors(caplog)
+
+
+def test_no_network_call_on_teardown_failure_without_a_webhook_configured(git_repo, tmp_path, deployed, caplog):
+    import subprocess, shutil
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), notify_webhook_url=None,
+                              prune_removed_stacks=True)
+    reconcile(settings)
+
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    from docker_operator.compose import DeployError
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("urllib.request.urlopen") as mock_urlopen, \
+         patch("docker_operator.compose.down", side_effect=DeployError("down failed", stderr="container busy")):
+        reconcile(settings)
+
+    mock_urlopen.assert_not_called()
+    _assert_no_swallowed_notify_errors(caplog)
+
+
+def test_no_network_call_on_git_unreachable_without_a_webhook_configured(tmp_path, deployed, caplog):
+    settings = make_settings(tmp_path, git_repo_url=str(tmp_path / "no-such-repo"), notify_webhook_url=None)
+
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("urllib.request.urlopen") as mock_urlopen:
+        reconcile(settings)
+
+    mock_urlopen.assert_not_called()
+    _assert_no_swallowed_notify_errors(caplog)
 
 
 # --- recovered notification ---
@@ -724,7 +992,7 @@ def test_recovered_notification_sent_after_a_prior_failure(git_repo, tmp_path, d
     assert color == COLOR_SUCCESS
 
 
-def test_recap_notification_sent_even_on_full_success_but_without_recovered_wording(git_repo, tmp_path, deployed, notified):
+def test_success_notification_sent_even_without_recovered_wording(git_repo, tmp_path, deployed, notified):
     add_stack(git_repo, "traefik")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
 
@@ -737,7 +1005,7 @@ def test_recap_notification_sent_even_on_full_success_but_without_recovered_word
     assert color == COLOR_SUCCESS
 
 
-def test_recap_splits_into_one_notification_per_status_bucket(git_repo, tmp_path, notified):
+def test_each_stack_gets_its_own_notification_not_a_mixed_recap(git_repo, tmp_path, notified):
     add_stack(git_repo, "good")
     add_stack(git_repo, "bad")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
@@ -751,37 +1019,111 @@ def test_recap_splits_into_one_notification_per_status_bucket(git_repo, tmp_path
          patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
         reconcile(settings)
 
-    # One notification per non-empty bucket this pass, not one mixed recap and not one per stack
+    # One notification per stack, not one mixed recap and not one per status bucket
     assert len(notified) == 2
-    by_title = {title: (description, color) for title, description, color in notified}
-    success_description, success_color = next(v for k, v in by_title.items() if "Success" in k)
-    warn_description, warn_color = next(v for k, v in by_title.items() if "Retrying" in k)
-    assert "good" in success_description
+    by_title = [(title, description, color) for title, description, color in notified]
+    success_title, success_description, success_color = next(t for t in by_title if "Success" in t[0])
+    failed_title, failed_description, failed_color = next(t for t in by_title if "Failed" in t[0])
+    assert "good" in success_description and "bad" not in success_description
     assert success_color == COLOR_SUCCESS
-    assert "bad" in warn_description
-    assert "invalid compose file" in warn_description
-    assert warn_color == COLOR_WARNING
+    assert "bad" in failed_description and "good" not in failed_description
+    assert "invalid compose error" in failed_description
+    assert failed_color == COLOR_ERROR
 
 
-def test_recap_truncates_a_bucket_with_more_than_15_stacks(git_repo, tmp_path, notified):
-    for i in range(20):
-        add_stack(git_repo, f"stack{i:02d}")
+def test_each_stack_notification_sent_as_its_own_deploy_finishes(git_repo, tmp_path, notified):
+    # Notifications must go out live, per stack, not be held back until the whole pass finishes
+    add_stack(git_repo, "first")
+    add_stack(git_repo, "second")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_priority=["first", "second"])
+    seen_at_second_deploy = []
+
+    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout, retry_login=None):
+        if project == "second":
+            seen_at_second_deploy.append(len(notified))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.compose.up", side_effect=fake_up):
+        reconcile(settings)
+
+    # "first" was already notified about by the time "second" started deploying
+    assert seen_at_second_deploy == [1]
+    assert len(notified) == 2
+
+
+# --- notification bugs must never be mistaken for deploy/teardown failures, or abort the rest of the pass ---
+
+def test_a_broken_success_notification_does_not_get_reported_as_a_deploy_failure(git_repo, tmp_path, deployed, caplog):
+    # A bug while building/sending the success notification must not flip an already-successful deploy into "failed" state
+    add_stack(git_repo, "good")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo))
 
-    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
-        return json.dumps({"networks": {}, "services": {project: {}}})
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.reconcile.notify", side_effect=RuntimeError("discord is down")):
+        # Must not raise even though the notification layer is completely broken
+        reconcile(settings)
 
-    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+    assert deployed == [("up", "good")]
+    st = state_mod.load(settings.state_file)
+    assert "good" in st["stacks"]
+    assert "good" not in st.get("retries", {})
+    assert any("failed to send success notification" in r.message for r in caplog.records)
+
+
+def test_a_broken_failure_notification_still_records_the_retry_state(git_repo, tmp_path, caplog):
+    # A bug while building/sending the failure notification must not cost us the retry bookkeeping that already happened
+    add_stack(git_repo, "bad")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_max_retries=3)
+
+    with caplog.at_level("ERROR", logger="docker_operator.reconcile"), \
+         patch("docker_operator.compose.resolve_config", side_effect=RuntimeError("invalid compose file")), \
+         patch("docker_operator.reconcile.notify", side_effect=RuntimeError("discord is down")):
+        # Must not raise
+        reconcile(settings)
+
+    st = state_mod.load(settings.state_file)
+    assert st["retries"]["bad"]["attempts"] == 1
+    assert any("failed to build/send failure notification" in r.message for r in caplog.records)
+
+
+def test_a_broken_notification_does_not_block_other_stacks_in_the_same_pass(git_repo, tmp_path, deployed):
+    # The whole point of catching notification bugs locally: one stack's broken notification must never cost every other stack in the pass
+    add_stack(git_repo, "first")
+    add_stack(git_repo, "second")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo))
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
+         patch("docker_operator.reconcile.notify", side_effect=RuntimeError("discord is down")):
+        reconcile(settings)
+
+    assert ("up", "first") in deployed
+    assert ("up", "second") in deployed
+    st = state_mod.load(settings.state_file)
+    assert "first" in st["stacks"] and "second" in st["stacks"]
+
+
+def test_a_broken_removal_notification_still_records_the_teardown(git_repo, tmp_path, deployed):
+    # Same isolation guarantee for the removed-stack path: a broken notification must not undo (or hide) the actual teardown
+    add_stack(git_repo, "temp")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=True)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=_no_networks_json), \
          patch("docker_operator.compose.up", side_effect=lambda *a, **k: None):
         reconcile(settings)
 
-    # A single "ok" bucket notification, its body capped rather than growing unbounded
-    assert len(notified) == 1
-    title, description, color = notified[0]
-    assert "Success" in title
-    assert color == COLOR_SUCCESS
-    assert "more, see logs" in description
-    assert "📦 Result: `20/20 containers started`" in description
+    import subprocess, shutil
+    shutil.rmtree(git_repo / "compose" / "temp")
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "remove temp"], cwd=git_repo, check=True, capture_output=True)
+
+    with patch("docker_operator.compose.down", side_effect=lambda *a, **k: None), \
+         patch("docker_operator.reconcile.notify", side_effect=RuntimeError("discord is down")):
+        # Must not raise
+        reconcile(settings)
+
+    st = state_mod.load(settings.state_file)
+    assert "temp" not in st["stacks"]
 
 
 def test_no_notification_on_a_pass_with_no_changes(git_repo, tmp_path, deployed, notified):

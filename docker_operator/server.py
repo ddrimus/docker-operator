@@ -7,6 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import Settings
+from .notify import flush as flush_notifications
 from .reconcile import reconcile
 from .security import verify_signature
 
@@ -157,4 +158,6 @@ def run(settings: Settings) -> None:
         # Both threads are daemons and would otherwise be killed mid-reconcile once this function returns
         worker.join(timeout=5)
         poller.join(timeout=5)
+        # Same reasoning as the CLI's --once path: the sender thread is a daemon too, so drain it before we exit
+        flush_notifications()
         log.info("shutdown complete")
