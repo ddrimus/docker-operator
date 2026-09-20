@@ -224,6 +224,33 @@ def test_deploy_priority_never_overrides_a_real_network_dependency(git_repo, tmp
     assert calls.index("traefik") < calls.index("forgejo")
 
 
+def test_deploy_priority_is_not_overtaken_by_an_unrelated_stack_while_a_priority_stack_waits_on_another(
+        git_repo, tmp_path):
+    # Regression: "forgejo" (priority) needs traefik's network and so isn't ready until traefik is; an unrelated, dependency-free stack must not deploy ahead of forgejo just because it happened to be ready sooner
+    add_stack(git_repo, "traefik")
+    add_stack(git_repo, "forgejo")
+    add_stack(git_repo, "unrelated")
+    settings = make_settings(tmp_path, git_repo_url=str(git_repo), deploy_priority=("traefik", "forgejo"))
+
+    def resolve_side_effect(compose_file, env_file, project, project_dir, timeout):
+        if project == "traefik":
+            return json.dumps({"networks": {"proxy": {"name": "proxy"}}})
+        if project == "forgejo":
+            return json.dumps({"networks": {"proxy": {"name": "proxy", "external": True}}})
+        return _no_networks_json()
+
+    calls: list[str] = []
+
+    def fake_up(compose_file, env_file, project, project_dir, *, pull, timeout, retry_login=None):
+        calls.append(project)
+
+    with patch("docker_operator.compose.resolve_config", side_effect=resolve_side_effect), \
+         patch("docker_operator.compose.up", side_effect=fake_up):
+        reconcile(settings)
+
+    assert calls == ["traefik", "forgejo", "unrelated"]
+
+
 def test_removed_stack_left_alone_when_prune_disabled(git_repo, tmp_path, deployed):
     add_stack(git_repo, "temp")
     settings = make_settings(tmp_path, git_repo_url=str(git_repo), prune_removed_stacks=False)

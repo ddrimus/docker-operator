@@ -129,3 +129,10 @@ def test_priority_sorted_feeds_into_topo_order_without_overriding_real_dependenc
 def test_priority_sorted_wins_ties_left_to_topo_order():
     order = topo_order(priority_sorted(["a", "b", "c"], ("c",)), {})
     assert order == ["c", "a", "b"]
+
+
+def test_priority_stack_waiting_on_its_own_dependency_is_not_overtaken_by_an_unrelated_stack():
+    # Regression: "b" is priority and depends on "a" (also priority), so it isn't ready until round 2; an
+    # unrelated, dependency-free "independent" must not slip in ahead of it just because it was ready sooner
+    order = topo_order(priority_sorted(["independent", "a", "b"], ("a", "b")), {"b": {"a"}})
+    assert order == ["a", "b", "independent"]
