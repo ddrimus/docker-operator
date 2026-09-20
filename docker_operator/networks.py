@@ -40,7 +40,7 @@ def priority_sorted(names: list[str], priority: tuple[str, ...]) -> list[str]:
     return sorted(names, key=lambda n: (rank.get(n, len(priority)), order[n]))
 
 
-# Order stacks via Kahn's algorithm, falling back to the given order on a dependency cycle
+# Order stacks via Kahn's algorithm, falling back to the given order on a dependency cycle. Picks one ready stack at a time rather than appending a whole ready-batch per round, so a stack that only just became ready (e.g. a lower-priority stack waiting on a still-pending higher-priority one) is compared against priority immediately instead of an unrelated, already-ready stack claiming the slot first
 def topo_order(names: list[str], depends_on: dict[str, set[str]]) -> list[str]:
     # Same reasoning as priority_sorted: a precomputed position beats names.index(n) inside the loop below
     order = {name: i for i, name in enumerate(names)}
@@ -53,10 +53,9 @@ def topo_order(names: list[str], depends_on: dict[str, set[str]]) -> list[str]:
             log.warning("stack dependency cycle detected among %s, using original order", pending)
             ordered.extend(pending)
             break
-        ready.sort(key=order.__getitem__)
-        for n in ready:
-            ordered.append(n)
-            pending.remove(n)
-            for other in pending:
-                remaining[other].discard(n)
+        n = min(ready, key=order.__getitem__)
+        ordered.append(n)
+        pending.remove(n)
+        for other in pending:
+            remaining[other].discard(n)
     return ordered
