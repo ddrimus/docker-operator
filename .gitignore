@@ -18,3 +18,6 @@ venv/
 .coverage
 htmlcov/
 
+
+# Runtime data from the default compose.yaml, holds the AGE private key and decrypted .env files
+data/
