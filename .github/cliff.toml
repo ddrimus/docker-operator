@@ -1,0 +1,49 @@
+# git-cliff config for the GitHub release notes, commits grouped by conventional commit type
+
+# Used for links, and to look up PR numbers and GitHub handles so the release shows its contributors
+[remote.github]
+owner = "ddrimus"
+repo = "docker-operator"
+
+[changelog]
+# The <!-- n --> prefixes only fix the section order, striptags hides them; Hidden holds merge commits
+# GitHub links a bare #12 or short hash by itself, commits pushed without a PR show their hash
+body = """
+{% set repo_url = "https://github.com/" ~ remote.github.owner ~ "/" ~ remote.github.repo -%}
+## What's Changed
+{% for group, commits in commits | group_by(attribute="group") %}
+{%- if group != "<!-- 9 -->Hidden" %}
+### {{ group | striptags | trim }}
+
+{% for commit in commits -%}
+- {{ commit.message | split(pat="\n") | first | trim }} \
+({% if commit.remote.pr_number %}#{{ commit.remote.pr_number }}{% else %}{{ commit.id | truncate(length=7, end="") }}{% endif %}) \
+{% if commit.remote.username %}@{{ commit.remote.username }}{% else %}{{ commit.author.name }}{% endif %}
+{% endfor -%}
+{% endif -%}
+{% endfor %}
+### 📝 Notes
+
+- Docker Image: `ghcr.io/{{ remote.github.owner }}/{{ remote.github.repo }}:{{ version | trim_start_matches(pat="v") }}`
+{% if previous.version -%}
+- Full Changelog: [{{ previous.version }} to {{ version }}]({{ repo_url }}/compare/{{ previous.version }}...{{ version }})
+{% endif -%}
+"""
+
+# Plain regex matching instead of the conventional parser, which drops commits it can't parse
+[git]
+conventional_commits = false
+filter_unconventional = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+# Squash merges end the title with " (#12)", the PR is linked separately
+commit_preprocessors = [
+  { pattern = '\s*\(#[0-9]+\)$', replace = "" },
+]
+# First match wins, anything that isn't feat or fix is a chore
+# Merges are hidden instead of skipped, a skipped commit takes its tag with it
+commit_parsers = [
+  { message = "^Merge ", group = "<!-- 9 -->Hidden" },
+  { message = "(?i)^feat", group = "<!-- 1 -->🚀 Features" },
+  { message = "(?i)^fix", group = "<!-- 2 -->🐛 Fixes" },
+  { message = ".*", group = "<!-- 3 -->🧹 Chores" },
+]

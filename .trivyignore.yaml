@@ -1,0 +1,69 @@
+# Accepted Trivy findings, scoped to one path with an expiry date
+
+# sops v3.13.3 is built with Go 1.26.5 and has no patched release yet, it only runs as a local CLI; remove after bumping SOPS_VERSION
+vulnerabilities:
+  - id: CVE-2026-56854
+    paths:
+      - usr/local/bin/sops
+    statement: x/crypto/ssh server, not used by sops
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-84304
+    paths:
+      - usr/local/bin/sops
+    statement: gRPC server, only used by sops keyservice which never runs here
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-84445
+    paths:
+      - usr/local/bin/sops
+    statement: gRPC server DoS, only used by sops keyservice which never runs here
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-33818
+    paths:
+      - usr/local/bin/sops
+    statement: encoding/asn1 DoS, input is our own keys and files
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-39821
+    paths:
+      - usr/local/bin/sops
+    statement: idna Punycode handling, no untrusted hostnames
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-46600
+    paths:
+      - usr/local/bin/sops
+    statement: dnsmessage DoS, no DNS server
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-56853
+    paths:
+      - usr/local/bin/sops
+    statement: net/http HTTP/2 server DoS, no HTTP server
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-56858
+    paths:
+      - usr/local/bin/sops
+    statement: html/template XSS, no HTML output
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-56859
+    paths:
+      - usr/local/bin/sops
+    statement: encoding/xml DoS, input is our own files
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-56860
+    paths:
+      - usr/local/bin/sops
+    statement: net/url DoS, no untrusted URLs
+    expired_at: 2027-03-31
+
+  - id: CVE-2026-56862
+    paths:
+      - usr/local/bin/sops
+    statement: crypto/tls server DoS, no TLS server
+    expired_at: 2027-03-31

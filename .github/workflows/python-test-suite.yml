@@ -1,0 +1,64 @@
+name: "Python: Test Suite"
+# Run on every PR and on main, plus manual dispatch
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# No default permissions, each job sets its own
+permissions: {}
+
+# Cancel a superseded run on the same ref
+concurrency:
+  group: python-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run Tests with Pytest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # Shallow, credential-less checkout; nothing here needs git history or push access
+      - name: Checkout repository source code (read-only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Same Python version as the image
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      # Take sops from the Dockerfile builder stage, so tests use the same binary as the image
+      - name: Install sops and age
+        run: |
+          set -euo pipefail
+          docker build --target builder -t docker-operator-builder .
+          cid="$(docker create docker-operator-builder)"
+          sudo docker cp "$cid:/usr/local/bin/sops" /usr/local/bin/sops
+          docker rm "$cid"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age
+          sops --version
+          age-keygen --version
+
+      # Package plus the test extras from pyproject.toml
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          pip install '.[test]'
+
+      # The runner has Docker, so the e2e tests run too
+      - name: Run unit, integration and end-to-end tests
+        run: |
+          set -euo pipefail
+          pytest --cov=docker_operator --cov-report=term-missing

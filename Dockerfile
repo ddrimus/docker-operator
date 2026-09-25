@@ -29,10 +29,11 @@ COPY --from=builder /usr/local/bin/sops /usr/local/bin/sops
 WORKDIR /app
 COPY docker_operator ./docker_operator
 COPY pyproject.toml ./
-# pip/setuptools/msgpack ship pinned in the base image and lag its own security fixes
-RUN pip install --no-cache-dir --upgrade pip setuptools msgpack \
-    && pip install --no-cache-dir . \
-    && rm -rf /app/pyproject.toml /root/.cache
+# pip, setuptools and msgpack are only needed to install the app and their bundled copies lag security fixes, so they're removed afterwards
+RUN pip install --no-cache-dir . \
+    && pip uninstall -y setuptools msgpack \
+    && python -m pip uninstall -y pip \
+    && rm -rf /app/pyproject.toml /app/*.egg-info /root/.cache
 
 ENV DATA_DIR=/data DEPLOY_DIR=/deploy LOG_DIR=/logs LISTEN_HOST=0.0.0.0 LISTEN_PORT=8080 TZ=UTC
 

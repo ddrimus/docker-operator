@@ -1,0 +1,41 @@
+# Weekly updates, one grouped PR per ecosystem, commits prefixed chore(deps) so release notes file them under Chores
+version: 2
+updates:
+  # Actions are pinned by SHA, the version comment next to each pin is updated with it
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Python base image in the Dockerfile
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      docker-base-image:
+        patterns:
+          - "*"
+
+  # Python packages from pyproject.toml, only the test extras for now
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"

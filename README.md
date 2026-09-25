@@ -1,11 +1,19 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="images/banner_light@2x.png">
-    <img src="images/banner_dark@2x.png" width="65%" alt="Docker Operator banner">
+    <img src="images/banner_dark@2x.png" width="55%" alt="Docker Operator banner">
   </picture>
 </p>
 <p align="center">
   A minimal, <em>fully declarative, git-driven</em>, secure <em>fully self-contained</em> GitOps-style deployer for docker compose stacks, with encrypted secrets via SOPS and notifications. Easily configured via environment variables and triggered by Forgejo webhooks.
+</p>
+
+<p align="center">
+  <a href="https://github.com/ddrimus/docker-operator/releases"><img src="https://img.shields.io/github/v/release/ddrimus/docker-operator?display_name=tag&label=Latest%20Release&color=47c72a&labelColor=404951" alt="Latest Release"></a>
+  <a href="https://github.com/ddrimus/docker-operator/actions/workflows/python-test-suite.yml"><img src="https://img.shields.io/github/actions/workflow/status/ddrimus/docker-operator/python-test-suite.yml?branch=main&label=Test%20Suite&labelColor=404951" alt="Test Suite"></a>
+  <a href="https://github.com/ddrimus/docker-operator/actions/workflows/docker-build-publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/ddrimus/docker-operator/docker-build-publish.yml?branch=main&label=Image%20Build&labelColor=404951" alt="Image Build"></a>
+  <a href="https://github.com/ddrimus/docker-operator/actions/workflows/github-code-scanning/codeql"><img src="https://img.shields.io/github/actions/workflow/status/ddrimus/docker-operator/github-code-scanning%2Fcodeql?label=Code%20Analysis&labelColor=404951" alt="Code Analysis"></a>
+  <a href="https://github.com/ddrimus/docker-operator/actions/workflows/docker-vulnerability-scan.yml"><img src="https://img.shields.io/github/actions/workflow/status/ddrimus/docker-operator/docker-vulnerability-scan.yml?label=Vulnerability%20Scan&labelColor=404951" alt="Vulnerability Scan"></a>
 </p>
 
 # What it does
