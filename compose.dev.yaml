@@ -1,6 +1,9 @@
 services:
   docker-operator:
-    image: ghcr.io/ddrimus/docker-operator:latest
+    image: docker-operator:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: docker-operator
     networks:
       - "docker-operator"
