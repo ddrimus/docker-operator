@@ -90,7 +90,7 @@ Using encrypted secrets? Put your AGE key in `data/config/sops_age.key` and leav
 ## 3. Start
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 docker compose logs -f docker-operator   # Ctrl+C to stop following
 ```
 
@@ -203,5 +203,11 @@ A change that keeps failing is retried `DEPLOY_MAX_RETRIES` times, then waits fo
 # Contributing
 
 If you have an improvement, extra information, or you notice something wrong with Docker Operator, feedback is welcome. Feel free to open a pull request with your suggestion or the details.
+
+To build the image from source, use the development compose file, which builds the local `Dockerfile` instead of pulling the published image:
+
+```bash
+docker compose -f compose.dev.yaml up -d --build
+```
 
 If something doesn't work as you expect, please open an [issue](https://github.com/ddrimus/docker-operator/issues) with everything relevant: what you did, what you expected, and the logs from `docker compose logs docker-operator` (set `LOG_LEVEL=DEBUG` for more). Remove any secret or token before you paste them. Your suggestions and feedback are always welcome and appreciated!
