@@ -1,5 +1,5 @@
 # Builder stage: only this stage needs curl, it never reaches the final image
-FROM python:3.14.8-alpine3.24 AS builder
+FROM python:3.15.0-alpine3.24 AS builder
 
 # ash supports pipefail, so a failing step inside a pipe like the checksum check stops the build instead of passing silently
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
@@ -18,7 +18,7 @@ RUN apk add --no-cache curl ca-certificates \
     && chmod +x /usr/local/bin/sops
 
 # Final stage: only what's needed to run, no curl, no build tooling
-FROM python:3.14.8-alpine3.24
+FROM python:3.15.0-alpine3.24
 
 # Runs as root since docker.sock is root-equivalent anyway; apk upgrade picks up alpine security backports, and the host-owned repos under /repository need git's safe.directory
 RUN apk upgrade --no-cache \
