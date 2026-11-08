@@ -12,7 +12,7 @@ ARG SOPS_SHA256_ARM64=53b0abacd38ef1b12a66d6c100956691b9cefce018d91f81e73ddf7438
 RUN apk add --no-cache curl ca-certificates \
     && ARCH=$(case "$(apk --print-arch)" in x86_64) echo amd64;; aarch64) echo arm64;; *) apk --print-arch;; esac) \
     && SHA256=$(if [ "$ARCH" = "amd64" ]; then echo "$SOPS_SHA256_AMD64"; else echo "$SOPS_SHA256_ARM64"; fi) \
-    && curl -fsSL -o /usr/local/bin/sops \
+    && curl -fsSL --retry 5 --retry-connrefused --connect-timeout 30 -o /usr/local/bin/sops \
         "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${ARCH}" \
     && echo "${SHA256}  /usr/local/bin/sops" | sha256sum -c - \
     && chmod +x /usr/local/bin/sops
